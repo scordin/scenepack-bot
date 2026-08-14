@@ -1,5 +1,5 @@
 """
-EditPacks Discord search, powered by Serper.
+EditPacks Discord scenepack search, powered by Serper.
 
 Install:
 pip install discord.py requests python-dotenv beautifulsoup4
@@ -23,17 +23,27 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 SERPER_URL = "https://google.serper.dev/search"
-SERPER_IMAGES_URL = "https://google.serper.dev/images"
 
 HOST = "editpacks.org"
+
 MAX_PACKS = 4
 
+ALLOWED_CHANNEL_ID = 1537846917130620939
+
+
+# ============================================================
+# RESULT
+# ============================================================
 
 @dataclass(frozen=True)
 class Result:
@@ -42,115 +52,55 @@ class Result:
     snippet: str = ""
 
 
+# ============================================================
+# EDITPACKS URL CHECK
+# ============================================================
+
 def is_editpacks_url(url: str) -> bool:
     parsed = urlparse(url)
 
     return (
         parsed.scheme in {"http", "https"}
         and parsed.netloc.lower().removeprefix("www.") == HOST
-        and (
-            parsed.path.startswith("/source/")
-            or parsed.path.startswith("/i/")
-        )
+        and parsed.path.startswith("/source/")
     )
 
 
-def label(value: str) -> str:
-    value = re.sub(
-        r"\s*[|–—-]\s*(?:411|Scenepacks?|Editing Clips.*)$",
-        "",
-        value,
-        flags=re.I,
-    )
+# ============================================================
+# TEXT CLEANING
+# ============================================================
 
-    value = re.sub(
-        r"\s*[:|–—-]\s*scenepacks?\s*&\s*audios.*$",
-        "",
-        value,
-        flags=re.I,
-    )
-
-    value = re.sub(
-        r"\s*[·|-]\s*editpacks.*$",
-        "",
-        value,
-        flags=re.I,
-    )
-
+def clean_text(value: str) -> str:
     return re.sub(
         r"\s+",
         " ",
+        value or "",
+    ).strip()
+
+
+def clean_title(value: str) -> str:
+    value = clean_text(value)
+
+    value = re.sub(
+        r"\s*[|–—-]\s*editpacks.*$",
+        "",
         value,
-    ).strip(" -|–—") or "Scenepack"
-
-
-def category_from_text(*values: str) -> str | None:
-    text = " ".join(values).lower()
-
-    categories = [
-        ("streamers & youtubers", "Streamer"),
-        ("streamers", "Streamer"),
-        ("sports", "Sports"),
-        ("music", "Music"),
-        ("k-pop", "K-Pop"),
-        ("anime", "Anime"),
-        ("manga", "Manga"),
-        ("movies", "Movie"),
-        ("movie", "Movie"),
-        ("shows", "Show"),
-        ("tv series", "TV Series"),
-        ("games", "Game"),
-        ("game", "Game"),
-        ("animations", "Animation"),
-    ]
-
-    for search, result in categories:
-        if search in text:
-            return result
-
-    return None
-
-
-def metadata(*values: str) -> str | None:
-    text = " ".join(values)
-
-    year = re.search(
-        r"\b((?:19|20)\d{2})\b",
-        text,
-    )
-
-    category = category_from_text(*values)
-
-    if year and category:
-        return f"{year.group(1)} · {category}"
-
-    if year:
-        return year.group(1)
-
-    return category
-
-
-def extract_pack_count(*values: str) -> int | None:
-    """
-    EditPacks title/search pages often contain:
-    '8 packs'
-    '1 pack'
-    '90 items'
-    """
-
-    text = " ".join(values)
-
-    matches = re.findall(
-        r"\b(\d+)\s+(?:packs?|items?)\b",
-        text,
         flags=re.I,
     )
 
-    if not matches:
-        return None
+    value = re.sub(
+        r"\s*:\s*scenepacks?\s*&\s*audios?.*$",
+        "",
+        value,
+        flags=re.I,
+    )
 
-    return max(int(x) for x in matches)
+    return value.strip(" -|–—") or "Scenepack"
 
+
+# ============================================================
+# SEARCH
+# ============================================================
 
 def search_serper(query: str) -> list[Result]:
     if not SERPER_API_KEY:
@@ -165,7 +115,9 @@ def search_serper(query: str) -> list[Result]:
             "Content-Type": "application/json",
         },
         json={
-            "q": f"{query} EditPacks",
+            # Search EditPacks specifically through the query,
+            # then enforce the domain locally.
+            "q": f"{query} EditPacks scenepack",
             "num": 20,
         },
         timeout=20,
@@ -178,37 +130,45 @@ def search_serper(query: str) -> list[Result]:
             f"{response.text[:180]}"
         )
 
+    results = []
     seen = set()
-    found = []
 
     for item in response.json().get("organic", []):
         url = item.get("link", "")
 
-        if (
-            is_editpacks_url(url)
-            and url not in seen
-        ):
-            seen.add(url)
+        if not is_editpacks_url(url):
+            continue
 
-            found.append(
-                Result(
-                    label(
-                        item.get("title", "")
-                    ),
-                    url,
-                    item.get("snippet", ""),
-                )
+        if url in seen:
+            continue
+
+        seen.add(url)
+
+        results.append(
+            Result(
+                title=clean_title(
+                    item.get("title", "")
+                ),
+                url=url,
+                snippet=clean_text(
+                    item.get("snippet", "")
+                ),
             )
+        )
 
-    return found
+    return results
 
 
-def score(
+# ============================================================
+# SEARCH RESULT RANKING
+# ============================================================
+
+def score_result(
     result: Result,
     query: str,
 ) -> int:
 
-    terms = [
+    query_terms = [
         x
         for x in re.findall(
             r"[a-z0-9]+",
@@ -220,52 +180,283 @@ def score(
     title = result.title.lower()
     snippet = result.snippet.lower()
 
-    score_value = 0
+    score = 0
 
-    for term in terms:
+    for term in query_terms:
+
+        # Exact title matches are useful for normal
+        # searches like "dexter".
         if term in title:
-            score_value += 10
+            score += 15
 
+        # Search snippets can contain character names.
         if term in snippet:
-            score_value += 2
+            score += 10
 
-    # Prefer actual title/source pages over
-    # individual item pages when both appear.
+    # Prefer EditPacks source/title pages.
     if "/source/" in result.url:
-        score_value += 15
+        score += 20
 
-    return score_value
+    return score
 
 
-def parse_pack_info(text: str) -> str:
+# ============================================================
+# FETCH EDITPACKS PAGE
+# ============================================================
+
+def fetch_page(
+    url: str,
+) -> tuple[BeautifulSoup, str] | None:
+
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/133.0 Safari/537.36"
+                )
+            },
+        )
+
+        response.raise_for_status()
+
+    except requests.RequestException:
+        return None
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser",
+    )
+
+    page_text = clean_text(
+        soup.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    return soup, page_text
+
+
+# ============================================================
+# TITLE INFORMATION
+# ============================================================
+
+def extract_title_info(
+    soup: BeautifulSoup,
+) -> tuple[str | None, str | None, str | None]:
+
+    title = None
+    category = None
+    year = None
+
+    # EditPacks has the actual page title as an H1.
+    h1 = soup.find("h1")
+
+    if h1:
+        title = clean_text(
+            h1.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+    # The page has information like:
+    #
+    # Shows · 2006
+    # Anime · 2002
+    # Movies · 2018
+    #
+    # Find the text directly around the H1.
+    if h1:
+        previous_text = []
+
+        for element in h1.find_all_previous(
+            limit=8
+        ):
+            text = clean_text(
+                element.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if text:
+                previous_text.append(text)
+
+        for text in previous_text:
+
+            match = re.search(
+                r"\b(Anime|Shows|Movies|Sports|Manga|Games|Streamers(?:\s*&\s*YouTubers)?|Music|Animations|K-Pop|Pictures)\s*[·|]\s*((?:19|20)\d{2})\b",
+                text,
+                flags=re.I,
+            )
+
+            if match:
+                category = match.group(1)
+                year = match.group(2)
+                break
+
+    # Fallback: search the entire page for the same pattern.
+    if not category or not year:
+
+        page_text = clean_text(
+            soup.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        match = re.search(
+            r"\b(Anime|Shows|Movies|Sports|Manga|Games|Streamers(?:\s*&\s*YouTubers)?|Music|Animations|K-Pop|Pictures)\s*[·|]\s*((?:19|20)\d{2})\b",
+            page_text,
+            flags=re.I,
+        )
+
+        if match:
+            category = match.group(1)
+            year = match.group(2)
+
+    if category:
+        category = clean_text(category)
+
+    return title, category, year
+
+
+# ============================================================
+# TITLE IMAGE
+# ============================================================
+
+def extract_title_image(
+    soup: BeautifulSoup,
+) -> str | None:
+
+    # Best option: Open Graph image.
+    og_image = soup.find(
+        "meta",
+        attrs={
+            "property": "og:image"
+        },
+    )
+
+    if og_image:
+        image = og_image.get("content")
+
+        if image:
+            return image
+
+    # Twitter image fallback.
+    twitter_image = soup.find(
+        "meta",
+        attrs={
+            "name": "twitter:image"
+        },
+    )
+
+    if twitter_image:
+        image = twitter_image.get("content")
+
+        if image:
+            return image
+
+    # Final fallback: find the first sensible image.
+    for image_tag in soup.select("img"):
+
+        src = (
+            image_tag.get("src")
+            or image_tag.get("data-src")
+            or image_tag.get("data-lazy-src")
+        )
+
+        if not src:
+            continue
+
+        if src.startswith("//"):
+            src = "https:" + src
+
+        elif src.startswith("/"):
+            src = f"https://{HOST}{src}"
+
+        lower = src.lower()
+
+        if any(
+            x in lower
+            for x in (
+                "logo",
+                "favicon",
+                "avatar",
+            )
+        ):
+            continue
+
+        return src
+
+    return None
+
+
+# ============================================================
+# PACK INFORMATION
+# ============================================================
+
+def extract_pack_info(
+    card_text: str,
+) -> tuple[str, str]:
     """
-    Pull a few useful details from an EditPacks card
-    without making the Discord message too long.
+    Extract useful information without making the
+    Discord message huge.
+
+    Example:
+
+    Scenepack Dub 1080p 3:14↓ 93 Dexter by tismpill
+
+    becomes:
+
+    1080p · 3:14 · 93 DL · by tismpill
     """
+
+    text = clean_text(card_text)
 
     parts = []
 
-    # Dub / Sub / resolution
-    quality_matches = re.findall(
-        r"\b(?:Dub|Sub|H\.?26[45]|[248]k|\d{3,4}p)\b",
+    # --------------------------------------------------------
+    # Audio / format
+    # --------------------------------------------------------
+
+    format_match = re.search(
+        r"\b(Dub|Sub|New Dub)\b",
         text,
         flags=re.I,
     )
 
-    if quality_matches:
-        quality = []
-
-        for value in quality_matches:
-            if value.lower() not in {
-                x.lower() for x in quality
-            }:
-                quality.append(value)
-
+    if format_match:
         parts.append(
-            " ".join(quality[:2])
+            format_match.group(1)
         )
 
+    # --------------------------------------------------------
+    # Resolution
+    # --------------------------------------------------------
+
+    resolution = re.search(
+        r"\b(?:2160p|1440p|1080p|720p|480p|360p|2k|4k)\b",
+        text,
+        flags=re.I,
+    )
+
+    if resolution:
+        parts.append(
+            resolution.group(0)
+        )
+
+    # --------------------------------------------------------
     # Duration
+    # --------------------------------------------------------
+
     duration = re.search(
         r"\b\d{1,2}:\d{2}\b",
         text,
@@ -276,7 +467,10 @@ def parse_pack_info(text: str) -> str:
             duration.group(0)
         )
 
+    # --------------------------------------------------------
     # File size
+    # --------------------------------------------------------
+
     size = re.search(
         r"\b\d+(?:\.\d+)?\s*(?:KB|MB|GB)\b",
         text,
@@ -288,7 +482,10 @@ def parse_pack_info(text: str) -> str:
             size.group(0)
         )
 
+    # --------------------------------------------------------
     # Downloads
+    # --------------------------------------------------------
+
     downloads = re.search(
         r"↓\s*([\d,.]+[kKmM]?)",
         text,
@@ -299,63 +496,101 @@ def parse_pack_info(text: str) -> str:
             f"{downloads.group(1)} DL"
         )
 
+    # --------------------------------------------------------
     # Creator
+    # --------------------------------------------------------
+
     creator = re.search(
-        r"\bby\s+(.+?)(?:requested by|$)",
+        r"\bby\s+(.+?)(?=$|\s+(?:S\d|requested by|Preview|Download))",
         text,
         flags=re.I,
     )
 
     if creator:
-        creator_name = creator.group(1).strip()
+        creator_name = clean_text(
+            creator.group(1)
+        )
 
-        # Keep it short
-        if len(creator_name) > 35:
-            creator_name = creator_name[:32] + "..."
+        if len(creator_name) > 30:
+            creator_name = (
+                creator_name[:27] + "..."
+            )
 
         parts.append(
             f"by {creator_name}"
         )
 
-    return " · ".join(parts)
-
-
-def page_packs(url: str) -> list[Result]:
-    """
-    Read individual EditPacks items from a title page.
-
-    EditPacks title pages contain /i/xxxx item links.
-    We only keep cards that are actually Scenepacks,
-    not Voice Lines.
-    """
-
-    try:
-        response = requests.get(
-            url,
-            timeout=15,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            },
-        )
-
-        response.raise_for_status()
-
-    except requests.RequestException:
-        return []
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser",
+    return (
+        " · ".join(parts),
+        text,
     )
+
+
+# ============================================================
+# FIND CHARACTER / PACK NAME
+# ============================================================
+
+def find_nearest_heading(
+    anchor,
+) -> str | None:
+
+    # EditPacks organizes packs under H2 headings:
+    #
+    # Dexter Morgan
+    # 5
+    # Image
+    # Dexter Morgan Scenepack
+    #
+    # Find the closest heading above the card.
+    heading = anchor.find_previous(
+        ["h2", "h3", "h4"]
+    )
+
+    if not heading:
+        return None
+
+    value = clean_text(
+        heading.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    if not value:
+        return None
+
+    # Ignore the main page title.
+    if value.lower() in {
+        "all characters",
+        "all titles",
+        "editpacks",
+    }:
+        return None
+
+    return value
+
+
+# ============================================================
+# PACK EXTRACTION
+# ============================================================
+
+def page_packs(
+    soup: BeautifulSoup,
+) -> list[Result]:
 
     found = []
     seen = set()
 
+    # EditPacks individual pack links use /i/
+    # while title pages use /source/.
     for anchor in soup.select(
         'a[href^="/i/"]'
     ):
 
-        href = anchor.get("href", "")
+        href = anchor.get(
+            "href",
+            "",
+        )
 
         if not href:
             continue
@@ -371,105 +606,150 @@ def page_packs(url: str) -> list[Result]:
         if href in seen:
             continue
 
-        # Get the surrounding card text.
-        parent = anchor
+        # ----------------------------------------------------
+        # Get the card surrounding the link.
+        # ----------------------------------------------------
 
-        for _ in range(5):
+        parent = anchor
+        card_text = ""
+
+        for _ in range(8):
+
             if parent.parent:
                 parent = parent.parent
 
-            text = parent.get_text(
+            candidate = clean_text(
+                parent.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            # A real pack card contains "Scenepack".
+            if "Scenepack" in candidate:
+                card_text = candidate
+                break
+
+        if not card_text:
+            continue
+
+        # ----------------------------------------------------
+        # Ignore voice lines / music / unrelated items.
+        # ----------------------------------------------------
+
+        if "Voice Line" in card_text:
+            continue
+
+        if "Scenepack" not in card_text:
+            continue
+
+        # ----------------------------------------------------
+        # Pack display name.
+        # ----------------------------------------------------
+
+        anchor_name = clean_text(
+            anchor.get_text(
                 " ",
                 strip=True,
             )
-
-            if (
-                "Scenepack" in text
-                or "Voice Line" in text
-                or "Audio" in text
-            ):
-                break
-
-        text = re.sub(
-            r"\s+",
-            " ",
-            text,
-        ).strip()
-
-        # Don't include voice lines/audio.
-        if "Voice Line" in text:
-            continue
-
-        # Only actual scenepacks.
-        if "Scenepack" not in text:
-            continue
-
-        title = anchor.get_text(
-            " ",
-            strip=True,
         )
 
-        if not title:
-            title = "Scenepack"
+        if not anchor_name:
+            anchor_name = "Scenepack"
 
-        info = parse_pack_info(text)
+        character = find_nearest_heading(
+            anchor
+        )
+
+        # If EditPacks has:
+        #
+        # Dexter Morgan
+        # Dexter Morgan Scenepack
+        #
+        # don't repeat the same name.
+        if (
+            character
+            and character.lower()
+            not in anchor_name.lower()
+        ):
+            base_name = character
+
+        else:
+            base_name = anchor_name
+
+        # ----------------------------------------------------
+        # Useful unique details.
+        # ----------------------------------------------------
+
+        info, raw_text = extract_pack_info(
+            card_text
+        )
+
+        # Grab short notes such as:
+        # "mix of seasons"
+        # "S1 scp"
+        # but don't dump the entire card.
+        note = ""
+
+        lines = [
+            clean_text(x)
+            for x in re.split(
+                r"(?<=[.!?])\s+|\s{2,}",
+                raw_text,
+            )
+            if clean_text(x)
+        ]
+
+        for line in lines:
+
+            lower = line.lower()
+
+            if (
+                "scenepack" not in lower
+                and "preview" not in lower
+                and "download" not in lower
+                and "by " not in lower
+                and not re.search(
+                    r"\b(?:1080p|720p|2k|4k|\d+:\d+|\d+(?:\.\d+)?\s*(?:KB|MB|GB))\b",
+                    line,
+                    flags=re.I,
+                )
+            ):
+                if len(line) <= 50:
+                    note = line
+                    break
+
+        # ----------------------------------------------------
+        # Build clean display name.
+        # ----------------------------------------------------
+
+        display_name = base_name
 
         if info:
-            title = f"{title} — {info}"
+            display_name += (
+                f" — {info}"
+            )
+
+        if note:
+            display_name += (
+                f" · {note}"
+            )
 
         seen.add(href)
 
         found.append(
             Result(
-                title[:180],
-                href,
+                title=display_name[:180],
+                url=href,
             )
         )
-
-        if len(found) >= MAX_PACKS:
-            break
 
     return found
 
 
-def poster_url(query: str) -> str | None:
-    """
-    Use the same Serper key to find a poster/image.
-    """
-
-    try:
-        response = requests.post(
-            SERPER_IMAGES_URL,
-            headers={
-                "X-API-KEY": SERPER_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "q": f"{query} official poster",
-                "num": 1,
-            },
-            timeout=15,
-        )
-
-        if not response.ok:
-            return None
-
-        image = (
-            response.json().get("images")
-            or [{}]
-        )[0]
-
-        return (
-            image.get("imageUrl")
-            or image.get("thumbnailUrl")
-        )
-
-    except (
-        requests.RequestException,
-        ValueError,
-    ):
-        return None
-
+# ============================================================
+# UNIQUE
+# ============================================================
 
 def unique(
     results: list[Result],
@@ -479,12 +759,19 @@ def unique(
     output = []
 
     for result in results:
-        if result.url not in seen:
-            seen.add(result.url)
-            output.append(result)
+
+        if result.url in seen:
+            continue
+
+        seen.add(result.url)
+        output.append(result)
 
     return output
 
+
+# ============================================================
+# EMBED
+# ============================================================
 
 def make_embed(
     query: str,
@@ -493,98 +780,174 @@ def make_embed(
 
     ranked = sorted(
         results,
-        key=lambda r: score(r, query),
+        key=lambda r: score_result(
+            r,
+            query,
+        ),
         reverse=True,
     )
 
     main = ranked[0]
 
-    # If we found an EditPacks title page,
-    # grab its individual packs.
-    packs = page_packs(main.url)
+    # --------------------------------------------------------
+    # Load the ACTUAL EditPacks page.
+    # --------------------------------------------------------
 
-    # If the search result itself is an individual
-    # EditPacks item, keep it as a fallback.
-    if not packs:
-        packs = [
-            r
-            for r in ranked
-            if r.url != main.url
+    page = fetch_page(
+        main.url
+    )
+
+    if page:
+        soup, page_text = page
+
+        real_title, category, year = (
+            extract_title_info(soup)
+        )
+
+        packs = page_packs(
+            soup
+        )
+
+        image = extract_title_image(
+            soup
+        )
+
+    else:
+        soup = None
+        page_text = ""
+
+        real_title = None
+        category = None
+        year = None
+
+        packs = []
+        image = None
+
+    # --------------------------------------------------------
+    # Use EditPacks' own title.
+    # --------------------------------------------------------
+
+    title = (
+        real_title
+        or main.title
+        or query
+    )
+
+    # --------------------------------------------------------
+    # If the search was for a character, the search
+    # result may point to a title page. That's okay,
+    # but make sure we actually found matching packs.
+    # --------------------------------------------------------
+
+    if packs:
+
+        query_terms = [
+            x
+            for x in re.findall(
+                r"[a-z0-9]+",
+                query.lower(),
+            )
+            if len(x) > 1
         ]
 
-        if not packs:
-            packs = [main]
+        matching_packs = []
 
-    packs = unique(packs)[:MAX_PACKS]
+        for pack in packs:
+
+            pack_text = (
+                f"{pack.title}"
+            ).lower()
+
+            if any(
+                term in pack_text
+                for term in query_terms
+            ):
+                matching_packs.append(
+                    pack
+                )
+
+        # If we have matching character packs,
+        # prefer those.
+        if matching_packs:
+            packs = matching_packs
+
+    packs = unique(
+        packs
+    )[:MAX_PACKS]
+
+    # --------------------------------------------------------
+    # Count actual EditPacks items.
+    # --------------------------------------------------------
+
+    total_packs = None
+
+    if page_text:
+
+        count_match = re.search(
+            r"\b(\d+)\s+items?\b",
+            page_text,
+            flags=re.I,
+        )
+
+        if count_match:
+            total_packs = int(
+                count_match.group(1)
+            )
+
+    if total_packs is None:
+        total_packs = len(packs)
+
+    # --------------------------------------------------------
+    # Information line.
+    #
+    # IMPORTANT:
+    # category/year comes ONLY from EditPacks.
+    # No guessing.
+    # --------------------------------------------------------
+
+    info_parts = []
+
+    if year:
+        info_parts.append(
+            year
+        )
+
+    if category:
+        info_parts.append(
+            category
+        )
+
+    info = (
+        " · ".join(info_parts)
+        if info_parts
+        else None
+    )
+
+    # --------------------------------------------------------
+    # Pack bullets.
+    # --------------------------------------------------------
 
     bullets = [
-        f"• [{label(pack.title)}]({pack.url})"
+        f"• [{pack.title}]({pack.url})"
         for pack in packs
     ]
 
     if not bullets:
+
         bullets = [
             "• No individual packs were indexed yet — "
             "open the title to browse it."
         ]
 
-    info = metadata(
-        main.title,
-        main.snippet,
-    )
-
-    # Try to get the actual total count from
-    # EditPacks instead of saying "0 packs".
-    total_count = extract_pack_count(
-        main.title,
-        main.snippet,
-    )
-
-    # If the page itself contains more accurate
-    # information, read it.
-    try:
-        page_response = requests.get(
-            main.url,
-            timeout=10,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            },
-        )
-
-        if page_response.ok:
-            page_text = BeautifulSoup(
-                page_response.text,
-                "html.parser",
-            ).get_text(
-                " ",
-                strip=True,
-            )
-
-            page_count = extract_pack_count(
-                page_text
-            )
-
-            if page_count is not None:
-                total_count = page_count
-
-            page_info = metadata(
-                page_text
-            )
-
-            if page_info:
-                info = page_info
-
-    except requests.RequestException:
-        pass
-
-    if total_count is None:
-        total_count = len(packs)
+    # --------------------------------------------------------
+    # EMBED
+    # --------------------------------------------------------
 
     embed = discord.Embed(
-        title=label(main.title),
+        title=title,
         url=main.url,
         description=(
-            f"**{total_count} packs found**"
+            f"**{total_packs} packs found**"
             + (
                 f"  •  {info}"
                 if info
@@ -605,20 +968,24 @@ def make_embed(
 
     embed.add_field(
         name="Available packs",
-        value="\n".join(bullets),
+        value="\n".join(
+            bullets
+        ),
         inline=False,
     )
 
     embed.add_field(
         name="",
         value=(
-            f"[View all packs for this title]"
+            "[View all packs for this title]"
             f"({main.url})"
         ),
         inline=False,
     )
 
-    image = poster_url(query)
+    # --------------------------------------------------------
+    # ACTUAL EDITPACKS IMAGE
+    # --------------------------------------------------------
 
     if image:
         embed.set_thumbnail(
@@ -632,23 +999,37 @@ def make_embed(
     return embed
 
 
+# ============================================================
+# BOT
+# ============================================================
+
 class Bot(discord.Client):
 
     def __init__(self) -> None:
+
         super().__init__(
             intents=discord.Intents.none()
         )
 
-        self.tree = discord.app_commands.CommandTree(
-            self
+        self.tree = (
+            discord.app_commands.CommandTree(
+                self
+            )
         )
 
-    async def setup_hook(self) -> None:
+    async def setup_hook(
+        self,
+    ) -> None:
+
         await self.tree.sync()
 
 
 bot = Bot()
 
+
+# ============================================================
+# READY
+# ============================================================
 
 @bot.event
 async def on_ready() -> None:
@@ -664,12 +1045,22 @@ async def on_ready() -> None:
     )
 
 
+# ============================================================
+# COMMAND
+# ============================================================
+
 @bot.tree.command(
     name="scenepack",
-    description="Find EditPacks for a movie, show, anime, sport, streamer, or music",
+    description=(
+        "Find EditPacks for a movie, show, anime, "
+        "sport, streamer, game, or music"
+    ),
 )
 @discord.app_commands.describe(
-    title="Movie, show, anime, sport, streamer, musician, or character"
+    title=(
+        "Movie, show, anime, sport, streamer, "
+        "game, music, or character"
+    ),
 )
 async def scenepack(
     interaction: discord.Interaction,
@@ -678,44 +1069,77 @@ async def scenepack(
 
     title = title.strip()
 
-    if interaction.channel_id != 1537846917130620939:
+    # --------------------------------------------------------
+    # Channel restriction
+    # --------------------------------------------------------
+
+    if (
+        interaction.channel_id
+        != ALLOWED_CHANNEL_ID
+    ):
+
         return await interaction.response.send_message(
-            "Use this command in <#1537846917130620939>.",
+            f"Use this command in "
+            f"<#{ALLOWED_CHANNEL_ID}>.",
             ephemeral=True,
         )
 
+    # --------------------------------------------------------
+    # Empty search
+    # --------------------------------------------------------
+
     if not title:
+
         await interaction.response.send_message(
             "Please enter a title to search for.",
             ephemeral=True,
         )
+
         return
+
+    # --------------------------------------------------------
+    # Searching
+    # --------------------------------------------------------
 
     await interaction.response.defer(
         thinking=True
     )
 
     try:
+
         results = await asyncio.to_thread(
             search_serper,
             title,
         )
 
     except Exception as exc:
+
         await interaction.followup.send(
             f"Search failed: `{exc}`",
             ephemeral=True,
         )
+
         return
 
+    # --------------------------------------------------------
+    # No result
+    # --------------------------------------------------------
+
     if not results:
+
         await interaction.followup.send(
             f"Couldn't find an EditPacks page for "
-            f"**{title}**. Try another spelling or "
-            f"search directly at https://editpacks.org/",
+            f"**{title}**.\n"
+            f"Try another spelling or search directly "
+            f"at https://editpacks.org/",
             ephemeral=True,
         )
+
         return
+
+    # --------------------------------------------------------
+    # Build embed
+    # --------------------------------------------------------
 
     embed = await asyncio.to_thread(
         make_embed,
@@ -727,6 +1151,10 @@ async def scenepack(
         embed=embed
     )
 
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
 
