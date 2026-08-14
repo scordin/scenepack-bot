@@ -531,74 +531,50 @@ def extract_title_image(
 # PACK INFORMATION
 # ============================================================
 
-def extract_pack_info(
-    card_text: str,
-) -> tuple[str, str]:
+def extract_pack_info(card_text: str) -> str:
     """
-    Extract useful information without making the
-    Discord message huge.
+    Extract a small amount of useful information from
+    one EditPacks pack card.
 
     Example:
+    Scenepack 1080p 3:14↓ 139 Dexter by tismpill
 
-    Scenepack Dub 1080p 3:14↓ 93 Dexter by tismpill
-
-    becomes:
-
-    1080p · 3:14 · 93 DL · by tismpill
+    -> 1080p · 3:14 · 139 DL · by tismpill
     """
 
     text = clean_text(card_text)
-
     parts = []
 
-    # --------------------------------------------------------
-    # Audio / format
-    # --------------------------------------------------------
-
-    format_match = re.search(
-        r"\b(Dub|Sub|New Dub)\b",
-        text,
-        flags=re.I,
-    )
-
-    if format_match:
-        parts.append(
-            format_match.group(1)
-        )
-
-    # --------------------------------------------------------
     # Resolution
-    # --------------------------------------------------------
-
     resolution = re.search(
-        r"\b(?:2160p|1440p|1080p|720p|480p|360p|2k|4k)\b",
+        r"\b(?:2160p|1440p|1080p|720p|480p|360p|4k|2k)\b",
         text,
         flags=re.I,
     )
 
     if resolution:
-        parts.append(
-            resolution.group(0)
-        )
+        parts.append(resolution.group(0))
 
-    # --------------------------------------------------------
+    # Dub / Sub
+    audio = re.search(
+        r"\b(?:New\s+Dub|Dub|Sub)\b",
+        text,
+        flags=re.I,
+    )
+
+    if audio:
+        parts.insert(0, audio.group(0))
+
     # Duration
-    # --------------------------------------------------------
-
     duration = re.search(
         r"\b\d{1,2}:\d{2}\b",
         text,
     )
 
     if duration:
-        parts.append(
-            duration.group(0)
-        )
+        parts.append(duration.group(0))
 
-    # --------------------------------------------------------
     # File size
-    # --------------------------------------------------------
-
     size = re.search(
         r"\b\d+(?:\.\d+)?\s*(?:KB|MB|GB)\b",
         text,
@@ -606,14 +582,9 @@ def extract_pack_info(
     )
 
     if size:
-        parts.append(
-            size.group(0)
-        )
+        parts.append(size.group(0))
 
-    # --------------------------------------------------------
     # Downloads
-    # --------------------------------------------------------
-
     downloads = re.search(
         r"↓\s*([\d,.]+[kKmM]?)",
         text,
@@ -624,12 +595,9 @@ def extract_pack_info(
             f"{downloads.group(1)} DL"
         )
 
-    # --------------------------------------------------------
     # Creator
-    # --------------------------------------------------------
-
     creator = re.search(
-        r"\bby\s+(.+?)(?=$|\s+(?:S\d|requested by|Preview|Download))",
+        r"\bby\s+(.+?)(?=$|\s+(?:S\d|Preview|Download))",
         text,
         flags=re.I,
     )
@@ -639,19 +607,24 @@ def extract_pack_info(
             creator.group(1)
         )
 
-        if len(creator_name) > 30:
+        # Remove trailing junk if present
+        creator_name = re.sub(
+            r"\s+(?:Preview|Download).*$",
+            "",
+            creator_name,
+            flags=re.I,
+        ).strip()
+
+        if len(creator_name) > 35:
             creator_name = (
-                creator_name[:27] + "..."
+                creator_name[:32] + "..."
             )
 
         parts.append(
             f"by {creator_name}"
         )
 
-    return (
-        " · ".join(parts),
-        text,
-    )
+    return " · ".join(parts)
 
 
 # ============================================================
@@ -705,12 +678,28 @@ def find_nearest_heading(
 def page_packs(
     soup: BeautifulSoup,
 ) -> list[Result]:
+    """
+    Extract individual scenepacks from an EditPacks
+    source page.
+
+    Each pack gets:
+    - actual pack name
+    - character/section when available
+    - resolution
+    - duration
+    - file size
+    - downloads
+    - creator
+    - optional short note
+
+    This also prevents identical-looking pack names.
+    """
 
     found = []
     seen = set()
 
-    # EditPacks individual pack links use /i/
-    # while title pages use /source/.
+    # Every individual pack on EditPacks uses /i/
+    # links.
     for anchor in soup.select(
         'a[href^="/i/"]'
     ):
@@ -734,134 +723,240 @@ def page_packs(
         if href in seen:
             continue
 
-        # ----------------------------------------------------
-        # Get the card surrounding the link.
-        # ----------------------------------------------------
+        # ====================================================
+        # FIND THE INDIVIDUAL CARD
+        # ====================================================
 
-        parent = anchor
-        card_text = ""
+        card = None
+        current = anchor
 
-        for _ in range(8):
+        # Walk upward until we find the smallest element
+        # containing:
+        #   - Scenepack
+        #   - Preview
+        #   - exactly one /i/ link
+        #
+        # This prevents us from accidentally grabbing the
+        # entire Dexter page.
+        for _ in range(10):
 
-            if parent.parent:
-                parent = parent.parent
+            if not current.parent:
+                break
 
-            candidate = clean_text(
-                parent.get_text(
+            current = current.parent
+
+            text = clean_text(
+                current.get_text(
                     " ",
                     strip=True,
                 )
             )
 
-            # A real pack card contains "Scenepack".
-            if "Scenepack" in candidate:
-                card_text = candidate
+            item_links = current.select(
+                'a[href^="/i/"]'
+            )
+
+            if (
+                "Scenepack" in text
+                and "Preview" in text
+                and len(item_links) == 1
+            ):
+                card = current
                 break
 
-        if not card_text:
+        if card is None:
             continue
 
-        # ----------------------------------------------------
-        # Ignore voice lines / music / unrelated items.
-        # ----------------------------------------------------
+        # ====================================================
+        # CARD TEXT
+        # ====================================================
 
-        if "Voice Line" in card_text:
-            continue
+        card_text = clean_text(
+            card.get_text(
+                " ",
+                strip=True,
+            )
+        )
 
+        # Only actual scenepacks.
         if "Scenepack" not in card_text:
             continue
 
-        # ----------------------------------------------------
-        # Pack display name.
-        # ----------------------------------------------------
+        # Ignore voice lines.
+        if "Voice Line" in card_text:
+            continue
 
-        anchor_name = clean_text(
+        # ====================================================
+        # PACK NAME
+        # ====================================================
+
+        pack_name = clean_text(
             anchor.get_text(
                 " ",
                 strip=True,
             )
         )
 
-        if not anchor_name:
-            anchor_name = "Scenepack"
+        if not pack_name:
+            pack_name = "Scenepack"
 
-        character = find_nearest_heading(
-            anchor
+        # ====================================================
+        # CHARACTER / SECTION
+        # ====================================================
+
+        character = None
+
+        # Find the nearest H2/H3 above this pack.
+        heading = anchor.find_previous(
+            ["h2", "h3", "h4"]
         )
 
-        # If EditPacks has:
-        #
-        # Dexter Morgan
-        # Dexter Morgan Scenepack
-        #
-        # don't repeat the same name.
-        if (
-            character
-            and character.lower()
-            not in anchor_name.lower()
-        ):
-            base_name = character
+        if heading:
+            heading_text = clean_text(
+                heading.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
 
-        else:
-            base_name = anchor_name
+            # Don't use the main title as the character.
+            if (
+                heading_text
+                and heading_text.lower()
+                not in {
+                    "all characters",
+                    "all titles",
+                    "editpacks",
+                }
+            ):
+                character = heading_text
 
-        # ----------------------------------------------------
-        # Useful unique details.
-        # ----------------------------------------------------
+        # ====================================================
+        # INFORMATION
+        # ====================================================
 
-        info, raw_text = extract_pack_info(
+        info = extract_pack_info(
             card_text
         )
 
-        # Grab short notes such as:
-        # "mix of seasons"
-        # "S1 scp"
-        # but don't dump the entire card.
+        # ====================================================
+        # OPTIONAL NOTE
+        # ====================================================
+
         note = ""
 
-        lines = [
-            clean_text(x)
-            for x in re.split(
-                r"(?<=[.!?])\s+|\s{2,}",
-                raw_text,
-            )
-            if clean_text(x)
-        ]
+        # EditPacks sometimes has notes such as:
+        # "mix of seasons:"
+        # "S1 scp"
+        # "S1 ep1, intro pool death scene"
+        #
+        # Extract only short useful notes.
+        #
+        # We remove the normal metadata first.
+        note_text = re.sub(
+            r"Scenepack",
+            "",
+            card_text,
+            flags=re.I,
+        )
 
-        for line in lines:
+        note_text = re.sub(
+            r"\b(?:2160p|1440p|1080p|720p|480p|360p|4k|2k)\b",
+            "",
+            note_text,
+            flags=re.I,
+        )
 
-            lower = line.lower()
+        note_text = re.sub(
+            r"\b(?:New\s+Dub|Dub|Sub)\b",
+            "",
+            note_text,
+            flags=re.I,
+        )
 
+        note_text = re.sub(
+            r"\b\d{1,2}:\d{2}\b",
+            "",
+            note_text,
+        )
+
+        note_text = re.sub(
+            r"\b\d+(?:\.\d+)?\s*(?:KB|MB|GB)\b",
+            "",
+            note_text,
+            flags=re.I,
+        )
+
+        note_text = re.sub(
+            r"↓\s*[\d,.]+[kKmM]?",
+            "",
+            note_text,
+        )
+
+        note_text = re.sub(
+            r"\bby\s+.+?(?=$|\s+(?:Preview|Download))",
+            "",
+            note_text,
+            flags=re.I,
+        )
+
+        note_text = clean_text(
+            note_text
+        )
+
+        # Remove common UI text.
+        note_text = re.sub(
+            r"\b(?:Preview|Download)\b",
+            "",
+            note_text,
+            flags=re.I,
+        )
+
+        note_text = clean_text(
+            note_text
+        )
+
+        # Only use notes that look meaningful.
+        if (
+            note_text
+            and len(note_text) <= 60
+            and note_text.lower()
+            not in {
+                pack_name.lower(),
+                character.lower()
+                if character
+                else "",
+            }
+        ):
+            # Don't accidentally use the title
+            # or character name as a note.
             if (
-                "scenepack" not in lower
-                and "preview" not in lower
-                and "download" not in lower
-                and "by " not in lower
-                and not re.search(
-                    r"\b(?:1080p|720p|2k|4k|\d+:\d+|\d+(?:\.\d+)?\s*(?:KB|MB|GB))\b",
-                    line,
-                    flags=re.I,
-                )
+                "Scenepack"
+                not in note_text
             ):
-                if len(line) <= 50:
-                    note = line
-                    break
+                note = note_text
 
-        # ----------------------------------------------------
-        # Build clean display name.
-        # ----------------------------------------------------
+        # ====================================================
+        # BUILD DISPLAY NAME
+        # ====================================================
 
-        display_name = base_name
+        display_name = pack_name
 
+        # If there is useful metadata, add it.
         if info:
             display_name += (
                 f" — {info}"
             )
 
+        # Add short note only when useful.
         if note:
             display_name += (
                 f" · {note}"
             )
+
+        # ====================================================
+        # SAVE
+        # ====================================================
 
         seen.add(href)
 
