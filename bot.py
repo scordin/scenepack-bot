@@ -1425,9 +1425,7 @@ class ResourceView(
 # BOT
 # ============================================================
 
-class Bot(
-    discord.Client
-):
+class Bot(discord.Client):
 
     def __init__(self):
 
@@ -1435,17 +1433,19 @@ class Bot(
             intents=discord.Intents.none()
         )
 
-        self.tree = (
-            discord.app_commands.CommandTree(
-                self
-            )
+        self.tree = discord.app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+
+        guild = discord.Object(
+            id=1520498998757032008
         )
 
-    async def setup_hook(
-        self,
-    ):
+        self.tree.copy_global_to(guild=guild)
 
-        await self.tree.sync()
+        await self.tree.sync(guild=guild)
+
+        print("✓ Slash commands synced to server.")
 
 
 bot = Bot()
