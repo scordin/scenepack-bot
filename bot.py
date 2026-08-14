@@ -389,17 +389,6 @@ def make_embed(query: str, results: list[Result]) -> discord.Embed:
         inline=False,
     )
 
-    embed.add_field(
-        name="👥 Cast & Crew",
-        value="Available on the Veel title page.",
-        inline=False,
-    )
-
-    embed.add_field(
-        name="📝 Creator's Notes",
-        value="Available on the Veel title page.",
-        inline=False,
-    )
 
     # Poster
     image = poster_url(query)
