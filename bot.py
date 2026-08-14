@@ -1,21 +1,27 @@
 """
-VeelCP Discord scenepack search, powered by Serper.
+EditPacks Discord search, powered by Serper.
 
-Install: pip install discord.py requests python-dotenv beautifulsoup4
-.env: DISCORD_TOKEN=... and SERPER_API_KEY=...
+Install:
+pip install discord.py requests python-dotenv beautifulsoup4
+
+.env:
+DISCORD_TOKEN=...
+SERPER_API_KEY=...
 """
+
 from __future__ import annotations
 
 import asyncio
 import os
 import re
 from dataclasses import dataclass
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 import discord
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+
 
 load_dotenv()
 
@@ -25,7 +31,7 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 SERPER_URL = "https://google.serper.dev/search"
 SERPER_IMAGES_URL = "https://google.serper.dev/images"
 
-HOST = "veelscp.com"
+HOST = "editpacks.org"
 MAX_PACKS = 4
 
 
@@ -36,18 +42,15 @@ class Result:
     snippet: str = ""
 
 
-def is_pack_url(url: str) -> bool:
+def is_editpacks_url(url: str) -> bool:
     parsed = urlparse(url)
 
     return (
         parsed.scheme in {"http", "https"}
         and parsed.netloc.lower().removeprefix("www.") == HOST
         and (
-            parsed.path.startswith("/tv/")
-            or parsed.path.startswith("/movie/")
-            or parsed.path.startswith("/game/")
-            or parsed.path.startswith("/other/")
-            or "scenepack=" in parsed.query
+            parsed.path.startswith("/source/")
+            or parsed.path.startswith("/i/")
         )
     )
 
@@ -60,36 +63,100 @@ def label(value: str) -> str:
         flags=re.I,
     )
 
-    return re.sub(r"\s+", " ", value).strip(" -|–—") or "Scenepack"
+    value = re.sub(
+        r"\s*[:|–—-]\s*scenepacks?\s*&\s*audios.*$",
+        "",
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(
+        r"\s*[·|-]\s*editpacks.*$",
+        "",
+        value,
+        flags=re.I,
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        value,
+    ).strip(" -|–—") or "Scenepack"
+
+
+def category_from_text(*values: str) -> str | None:
+    text = " ".join(values).lower()
+
+    categories = [
+        ("streamers & youtubers", "Streamer"),
+        ("streamers", "Streamer"),
+        ("sports", "Sports"),
+        ("music", "Music"),
+        ("k-pop", "K-Pop"),
+        ("anime", "Anime"),
+        ("manga", "Manga"),
+        ("movies", "Movie"),
+        ("movie", "Movie"),
+        ("shows", "Show"),
+        ("tv series", "TV Series"),
+        ("games", "Game"),
+        ("game", "Game"),
+        ("animations", "Animation"),
+    ]
+
+    for search, result in categories:
+        if search in text:
+            return result
+
+    return None
 
 
 def metadata(*values: str) -> str | None:
     text = " ".join(values)
 
-    year = re.search(r"\b((?:19|20)\d{2})\b", text)
-
-    lower = text.lower()
-
-    kind = (
-        "TV series"
-        if any(
-            x in lower
-            for x in ("tv series", "television series", "season ")
-        )
-        else "Film"
-        if any(x in lower for x in ("film", "movie"))
-        else None
+    year = re.search(
+        r"\b((?:19|20)\d{2})\b",
+        text,
     )
 
-    if year and kind:
-        return f"{year.group(1)} · {kind}"
+    category = category_from_text(*values)
 
-    return year.group(1) if year else kind
+    if year and category:
+        return f"{year.group(1)} · {category}"
+
+    if year:
+        return year.group(1)
+
+    return category
+
+
+def extract_pack_count(*values: str) -> int | None:
+    """
+    EditPacks title/search pages often contain:
+    '8 packs'
+    '1 pack'
+    '90 items'
+    """
+
+    text = " ".join(values)
+
+    matches = re.findall(
+        r"\b(\d+)\s+(?:packs?|items?)\b",
+        text,
+        flags=re.I,
+    )
+
+    if not matches:
+        return None
+
+    return max(int(x) for x in matches)
 
 
 def search_serper(query: str) -> list[Result]:
     if not SERPER_API_KEY:
-        raise RuntimeError("SERPER_API_KEY is missing from .env")
+        raise RuntimeError(
+            "SERPER_API_KEY is missing from .env"
+        )
 
     response = requests.post(
         SERPER_URL,
@@ -98,15 +165,16 @@ def search_serper(query: str) -> list[Result]:
             "Content-Type": "application/json",
         },
         json={
-            "q": f"{query} Veel Scenepacks",
-            "num": 12,
+            "q": f"{query} EditPacks",
+            "num": 20,
         },
         timeout=20,
     )
 
     if not response.ok:
         raise RuntimeError(
-            f"Serper returned HTTP {response.status_code}: "
+            f"Serper returned HTTP "
+            f"{response.status_code}: "
             f"{response.text[:180]}"
         )
 
@@ -116,108 +184,149 @@ def search_serper(query: str) -> list[Result]:
     for item in response.json().get("organic", []):
         url = item.get("link", "")
 
-        if is_pack_url(url) and url not in seen:
+        if (
+            is_editpacks_url(url)
+            and url not in seen
+        ):
             seen.add(url)
 
             found.append(
                 Result(
-                    label(item.get("title", "")),
+                    label(
+                        item.get("title", "")
+                    ),
                     url,
                     item.get("snippet", ""),
                 )
             )
 
-    # If Serper doesn't directly find VeelCP,
-    # use the TMDB ID method from the second code.
-    if found:
-        return found
-
-    return tmdb_to_veel_page(query)
+    return found
 
 
-def tmdb_to_veel_page(query: str) -> list[Result]:
-    """
-    Find the TMDB title ID and construct the corresponding
-    VeelCP page.
-    """
+def score(
+    result: Result,
+    query: str,
+) -> int:
 
-    if not SERPER_API_KEY:
-        return []
-
-    response = requests.post(
-        SERPER_URL,
-        headers={
-            "X-API-KEY": SERPER_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "q": f"{query} TMDB",
-            "num": 8,
-        },
-        timeout=20,
-    )
-
-    if not response.ok:
-        return []
-
-    for item in response.json().get("organic", []):
-        link = item.get("link", "")
-
-        parsed = urlparse(link)
-
-        match = re.match(
-            r"^/(tv|movie)/(\d+)",
-            parsed.path,
-        )
-
-        if parsed.netloc.lower().endswith("themoviedb.org") and match:
-            media_type, media_id = match.groups()
-
-            url = (
-                f"https://veelscp.com/"
-                f"{media_type}/{media_id}"
-                f"?search={quote_plus(query)}"
-            )
-
-            return [
-                Result(
-                    label(item.get("title", query)),
-                    url,
-                    item.get("snippet", ""),
-                )
-            ]
-
-    return []
-
-
-def score(result: Result, query: str) -> int:
     terms = [
         x
-        for x in re.findall(r"[a-z0-9]+", query.lower())
+        for x in re.findall(
+            r"[a-z0-9]+",
+            query.lower(),
+        )
         if len(x) > 1
     ]
 
-    haystack = f"{result.title} {result.snippet}".lower()
+    title = result.title.lower()
+    snippet = result.snippet.lower()
 
-    return (
-        sum(
-            10
-            for x in terms
-            if x in result.title.lower()
-        )
-        +
-        sum(
-            2
-            for x in terms
-            if x in haystack
-        )
+    score_value = 0
+
+    for term in terms:
+        if term in title:
+            score_value += 10
+
+        if term in snippet:
+            score_value += 2
+
+    # Prefer actual title/source pages over
+    # individual item pages when both appear.
+    if "/source/" in result.url:
+        score_value += 15
+
+    return score_value
+
+
+def parse_pack_info(text: str) -> str:
+    """
+    Pull a few useful details from an EditPacks card
+    without making the Discord message too long.
+    """
+
+    parts = []
+
+    # Dub / Sub / resolution
+    quality_matches = re.findall(
+        r"\b(?:Dub|Sub|H\.?26[45]|[248]k|\d{3,4}p)\b",
+        text,
+        flags=re.I,
     )
+
+    if quality_matches:
+        quality = []
+
+        for value in quality_matches:
+            if value.lower() not in {
+                x.lower() for x in quality
+            }:
+                quality.append(value)
+
+        parts.append(
+            " ".join(quality[:2])
+        )
+
+    # Duration
+    duration = re.search(
+        r"\b\d{1,2}:\d{2}\b",
+        text,
+    )
+
+    if duration:
+        parts.append(
+            duration.group(0)
+        )
+
+    # File size
+    size = re.search(
+        r"\b\d+(?:\.\d+)?\s*(?:KB|MB|GB)\b",
+        text,
+        flags=re.I,
+    )
+
+    if size:
+        parts.append(
+            size.group(0)
+        )
+
+    # Downloads
+    downloads = re.search(
+        r"↓\s*([\d,.]+[kKmM]?)",
+        text,
+    )
+
+    if downloads:
+        parts.append(
+            f"{downloads.group(1)} DL"
+        )
+
+    # Creator
+    creator = re.search(
+        r"\bby\s+(.+?)(?:requested by|$)",
+        text,
+        flags=re.I,
+    )
+
+    if creator:
+        creator_name = creator.group(1).strip()
+
+        # Keep it short
+        if len(creator_name) > 35:
+            creator_name = creator_name[:32] + "..."
+
+        parts.append(
+            f"by {creator_name}"
+        )
+
+    return " · ".join(parts)
 
 
 def page_packs(url: str) -> list[Result]:
     """
-    Read the individual scenepack/download links exposed
-    on the public VeelCP title page.
+    Read individual EditPacks items from a title page.
+
+    EditPacks title pages contain /i/xxxx item links.
+    We only keep cards that are actually Scenepacks,
+    not Voice Lines.
     """
 
     try:
@@ -234,48 +343,98 @@ def page_packs(url: str) -> list[Result]:
     except requests.RequestException:
         return []
 
-    found = []
-    seen = {url.rstrip("/")}
-
-    for anchor in BeautifulSoup(
+    soup = BeautifulSoup(
         response.text,
         "html.parser",
-    ).select("a[href]"):
+    )
 
-        href = anchor["href"]
+    found = []
+    seen = set()
+
+    for anchor in soup.select(
+        'a[href^="/i/"]'
+    ):
+
+        href = anchor.get("href", "")
+
+        if not href:
+            continue
 
         if href.startswith("/"):
             href = f"https://{HOST}{href}"
 
-        href = href.split("#", 1)[0].rstrip("/")
+        href = href.split(
+            "#",
+            1,
+        )[0].rstrip("/")
 
-        text = label(
-            anchor.get_text(
+        if href in seen:
+            continue
+
+        # Get the surrounding card text.
+        parent = anchor
+
+        for _ in range(5):
+            if parent.parent:
+                parent = parent.parent
+
+            text = parent.get_text(
                 " ",
                 strip=True,
             )
+
+            if (
+                "Scenepack" in text
+                or "Voice Line" in text
+                or "Audio" in text
+            ):
+                break
+
+        text = re.sub(
+            r"\s+",
+            " ",
+            text,
+        ).strip()
+
+        # Don't include voice lines/audio.
+        if "Voice Line" in text:
+            continue
+
+        # Only actual scenepacks.
+        if "Scenepack" not in text:
+            continue
+
+        title = anchor.get_text(
+            " ",
+            strip=True,
         )
 
-        if (
-            is_pack_url(href)
-            and href not in seen
-            and text != "Scenepack"
-        ):
-            seen.add(href)
+        if not title:
+            title = "Scenepack"
 
-            found.append(
-                Result(
-                    text[:120],
-                    href,
-                )
+        info = parse_pack_info(text)
+
+        if info:
+            title = f"{title} — {info}"
+
+        seen.add(href)
+
+        found.append(
+            Result(
+                title[:180],
+                href,
             )
+        )
+
+        if len(found) >= MAX_PACKS:
+            break
 
     return found
 
 
 def poster_url(query: str) -> str | None:
     """
-    Use the same Serper key to find a poster.
+    Use the same Serper key to find a poster/image.
     """
 
     try:
@@ -312,7 +471,10 @@ def poster_url(query: str) -> str | None:
         return None
 
 
-def unique(results: list[Result]) -> list[Result]:
+def unique(
+    results: list[Result],
+) -> list[Result]:
+
     seen = set()
     output = []
 
@@ -324,7 +486,11 @@ def unique(results: list[Result]) -> list[Result]:
     return output
 
 
-def make_embed(query: str, results: list[Result]) -> discord.Embed:
+def make_embed(
+    query: str,
+    results: list[Result],
+) -> discord.Embed:
+
     ranked = sorted(
         results,
         key=lambda r: score(r, query),
@@ -333,76 +499,134 @@ def make_embed(query: str, results: list[Result]) -> discord.Embed:
 
     main = ranked[0]
 
-    info = metadata(main.title, main.snippet)
+    # If we found an EditPacks title page,
+    # grab its individual packs.
+    packs = page_packs(main.url)
 
-    # Determine category
-    lower = f"{main.title} {main.snippet}".lower()
+    # If the search result itself is an individual
+    # EditPacks item, keep it as a fallback.
+    if not packs:
+        packs = [
+            r
+            for r in ranked
+            if r.url != main.url
+        ]
 
-    if any(x in lower for x in ("tv series", "television series", "season ")):
-        category = "TV"
-    elif any(x in lower for x in ("film", "movie")):
-        category = "Movie"
-    elif "game" in lower:
-        category = "Game"
-    else:
-        category = "Other"
+        if not packs:
+            packs = [main]
+
+    packs = unique(packs)[:MAX_PACKS]
+
+    bullets = [
+        f"• [{label(pack.title)}]({pack.url})"
+        for pack in packs
+    ]
+
+    if not bullets:
+        bullets = [
+            "• No individual packs were indexed yet — "
+            "open the title to browse it."
+        ]
+
+    info = metadata(
+        main.title,
+        main.snippet,
+    )
+
+    # Try to get the actual total count from
+    # EditPacks instead of saying "0 packs".
+    total_count = extract_pack_count(
+        main.title,
+        main.snippet,
+    )
+
+    # If the page itself contains more accurate
+    # information, read it.
+    try:
+        page_response = requests.get(
+            main.url,
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            },
+        )
+
+        if page_response.ok:
+            page_text = BeautifulSoup(
+                page_response.text,
+                "html.parser",
+            ).get_text(
+                " ",
+                strip=True,
+            )
+
+            page_count = extract_pack_count(
+                page_text
+            )
+
+            if page_count is not None:
+                total_count = page_count
+
+            page_info = metadata(
+                page_text
+            )
+
+            if page_info:
+                info = page_info
+
+    except requests.RequestException:
+        pass
+
+    if total_count is None:
+        total_count = len(packs)
 
     embed = discord.Embed(
-        title="Veel Scenepacks",
+        title=label(main.title),
         url=main.url,
-        colour=discord.Colour.from_rgb(114, 137, 218),
+        description=(
+            f"**{total_count} packs found**"
+            + (
+                f"  •  {info}"
+                if info
+                else ""
+            )
+        ),
+        colour=discord.Colour.from_rgb(
+            114,
+            137,
+            218,
+        ),
     )
 
-    # Main title
+    embed.set_author(
+        name="EditPacks",
+        url="https://editpacks.org/",
+    )
+
     embed.add_field(
-        name="🎬 Title",
-        value=f"**{label(main.title)}**",
+        name="Available packs",
+        value="\n".join(bullets),
         inline=False,
     )
 
-    # Category + year
-    details = f"**Category:** {category}"
-
-    if info:
-        details += f"\n**Release:** {info}"
-
     embed.add_field(
-        name="📁 Information",
-        value=details,
-        inline=False,
-    )
-
-    # Main Veel page
-    embed.add_field(
-        name="📦 Available Scenepacks",
+        name="",
         value=(
-            "Scenepacks are available on the Veel page.\n"
-            f"**[Open {label(main.title)} on Veel →]({main.url})**"
+            f"[View all packs for this title]"
+            f"({main.url})"
         ),
         inline=False,
     )
 
-    # Search-related sections that Veel provides
-    embed.add_field(
-        name="🎞️ Content",
-        value="**Trailer**  •  **Cast**",
-        inline=False,
-    )
-
-
-    # Poster
     image = poster_url(query)
 
     if image:
-        embed.set_thumbnail(url=image)
-
-    embed.set_author(
-        name="Veel Scenepacks",
-        url="https://veelscp.com/",
-    )
+        embed.set_thumbnail(
+            url=image
+        )
 
     embed.set_footer(
-        text=f"Veel Scenepacks · Search: {query}"
+        text=f"Results for {query} · 1 title"
     )
 
     return embed
@@ -428,8 +652,10 @@ bot = Bot()
 
 @bot.event
 async def on_ready() -> None:
+
     print(
-        f"✓ Bot is ready: {bot.user} "
+        f"✓ Bot is ready: "
+        f"{bot.user} "
         f"(ID: {bot.user.id})"
     )
 
@@ -440,10 +666,10 @@ async def on_ready() -> None:
 
 @bot.tree.command(
     name="scenepack",
-    description="Find Veel Scenepacks for a movie or show",
+    description="Find EditPacks for a movie, show, anime, sport, streamer, or music",
 )
 @discord.app_commands.describe(
-    title="Movie, show, or character to search for"
+    title="Movie, show, anime, sport, streamer, musician, or character"
 )
 async def scenepack(
     interaction: discord.Interaction,
@@ -484,10 +710,9 @@ async def scenepack(
 
     if not results:
         await interaction.followup.send(
-            f"Couldn't find a VeelCP page for "
-            f"**{title}**. Try another spelling, "
-            f"or search directly at "
-            f"https://veelscp.com/",
+            f"Couldn't find an EditPacks page for "
+            f"**{title}**. Try another spelling or "
+            f"search directly at https://editpacks.org/",
             ephemeral=True,
         )
         return
