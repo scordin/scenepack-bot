@@ -874,11 +874,18 @@ class Bot(
             )
         )
 
-    async def setup_hook(
-        self,
-    ):
+async def setup_hook(self):
+    # Remove old globally registered commands
+    self.tree.clear_commands(guild=None)
 
-        await self.tree.sync()
+    # Re-add ONLY the current /scenepack command
+    self.tree.add_command(scenepack)
+
+    # Sync the cleaned command list with Discord
+    await self.tree.sync()
+
+    print("✓ Old commands cleared.")
+    print("✓ Only /scenepack has been synced.")
 
 
 bot = Bot()
