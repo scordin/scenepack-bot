@@ -102,11 +102,128 @@ def clean_title(value: str) -> str:
 # SEARCH
 # ============================================================
 
+def direct_editpacks_page(query: str) -> list[Result]:
+    """
+    Try the obvious EditPacks /source/slug URL first.
+
+    This fixes searches like:
+        you
+        dexter
+        naruto
+        bleach
+        death note
+
+    where the EditPacks page exists but Serper doesn't
+    return it reliably.
+    """
+
+    # Turn the search into an EditPacks-style slug.
+    slug = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        query.lower(),
+    ).strip("-")
+
+    if not slug:
+        return []
+
+    url = f"https://{HOST}/source/{slug}"
+
+    try:
+        response = requests.get(
+            url,
+            timeout=12,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/133.0 Safari/537.36"
+                )
+            },
+            allow_redirects=True,
+        )
+
+        if response.status_code != 200:
+            return []
+
+        # Make sure this is actually an EditPacks title page
+        # and not just some generic 200 response.
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+
+        page_text = clean_text(
+            soup.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        # A real source page contains "items" and
+        # EditPacks title information.
+        if not re.search(
+            r"\b\d+\s+items?\b",
+            page_text,
+            flags=re.I,
+        ):
+            return []
+
+        h1 = soup.find("h1")
+
+        if not h1:
+            return []
+
+        title = clean_text(
+            h1.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        if not title:
+            return []
+
+        return [
+            Result(
+                title=title,
+                url=response.url,
+                snippet=page_text[:500],
+            )
+        ]
+
+    except requests.RequestException:
+        return []
+
+
 def search_serper(query: str) -> list[Result]:
+    """
+    Search EditPacks.
+
+    Order:
+        1. Direct /source/slug lookup
+        2. Serper fallback
+    """
+
     if not SERPER_API_KEY:
         raise RuntimeError(
             "SERPER_API_KEY is missing from .env"
         )
+
+    # ========================================================
+    # 1. DIRECT EDITPACKS LOOKUP
+    # ========================================================
+
+    direct = direct_editpacks_page(query)
+
+    if direct:
+        return direct
+
+    # ========================================================
+    # 2. SERPER FALLBACK
+    # ========================================================
 
     response = requests.post(
         SERPER_URL,
@@ -115,8 +232,6 @@ def search_serper(query: str) -> list[Result]:
             "Content-Type": "application/json",
         },
         json={
-            # Search EditPacks specifically through the query,
-            # then enforce the domain locally.
             "q": f"{query} EditPacks scenepack",
             "num": 20,
         },
@@ -133,8 +248,15 @@ def search_serper(query: str) -> list[Result]:
     results = []
     seen = set()
 
-    for item in response.json().get("organic", []):
-        url = item.get("link", "")
+    for item in response.json().get(
+        "organic",
+        [],
+    ):
+
+        url = item.get(
+            "link",
+            "",
+        )
 
         if not is_editpacks_url(url):
             continue
@@ -147,11 +269,17 @@ def search_serper(query: str) -> list[Result]:
         results.append(
             Result(
                 title=clean_title(
-                    item.get("title", "")
+                    item.get(
+                        "title",
+                        "",
+                    )
                 ),
                 url=url,
                 snippet=clean_text(
-                    item.get("snippet", "")
+                    item.get(
+                        "snippet",
+                        "",
+                    )
                 ),
             )
         )
