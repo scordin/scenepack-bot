@@ -324,11 +324,7 @@ def unique(results: list[Result]) -> list[Result]:
     return output
 
 
-def make_embed(
-    query: str,
-    results: list[Result],
-) -> discord.Embed:
-
+def make_embed(query: str, results: list[Result]) -> discord.Embed:
     ranked = sorted(
         results,
         key=lambda r: score(r, query),
@@ -337,72 +333,87 @@ def make_embed(
 
     main = ranked[0]
 
-    packs = unique(
-        page_packs(main.url)
-        + [
-            r
-            for r in ranked
-            if r.url != main.url
-        ]
-    )[:MAX_PACKS]
+    info = metadata(main.title, main.snippet)
 
-    bullets = [
-        f"• [{label(pack.title)}]({pack.url})"
-        for pack in packs
-    ]
+    # Determine category
+    lower = f"{main.title} {main.snippet}".lower()
 
-    if not bullets:
-        bullets = [
-            "• No individual links were indexed yet — "
-            "open the title to browse it."
-        ]
-
-    info = metadata(
-        main.title,
-        main.snippet,
-    )
+    if any(x in lower for x in ("tv series", "television series", "season ")):
+        category = "TV"
+    elif any(x in lower for x in ("film", "movie")):
+        category = "Movie"
+    elif "game" in lower:
+        category = "Game"
+    else:
+        category = "Other"
 
     embed = discord.Embed(
-        title=label(main.title),
+        title="Veel Scenepacks",
         url=main.url,
-        description=(
-            f"**{len(packs)} packs found**"
-            + (f"  •  {info}" if info else "")
-        ),
-        colour=discord.Colour.from_rgb(
-            114,
-            137,
-            218,
-        ),
+        colour=discord.Colour.from_rgb(114, 137, 218),
     )
+
+    # Main title
+    embed.add_field(
+        name="🎬 Title",
+        value=f"**{label(main.title)}**",
+        inline=False,
+    )
+
+    # Category + year
+    details = f"**Category:** {category}"
+
+    if info:
+        details += f"\n**Release:** {info}"
+
+    embed.add_field(
+        name="📁 Information",
+        value=details,
+        inline=False,
+    )
+
+    # Main Veel page
+    embed.add_field(
+        name="📦 Available Scenepacks",
+        value=(
+            "Scenepacks are available on the Veel page.\n"
+            f"**[Open {label(main.title)} on Veel →]({main.url})**"
+        ),
+        inline=False,
+    )
+
+    # Search-related sections that Veel provides
+    embed.add_field(
+        name="🎞️ Content",
+        value="**Trailer**  •  **Cast**",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="👥 Cast & Crew",
+        value="Available on the Veel title page.",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📝 Creator's Notes",
+        value="Available on the Veel title page.",
+        inline=False,
+    )
+
+    # Poster
+    image = poster_url(query)
+
+    if image:
+        embed.set_thumbnail(url=image)
 
     embed.set_author(
         name="Veel Scenepacks",
         url="https://veelscp.com/",
     )
 
-    embed.add_field(
-        name="Available packs",
-        value="\n".join(bullets),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="",
-        value=(
-            f"[View all packs for this title]"
-            f"({main.url})"
-        ),
-        inline=False,
-    )
-
-    image = poster_url(query)
-
-    if image:
-        embed.set_thumbnail(url=image)
-
     embed.set_footer(
-        text=f"Results for {query} · 1 title"
+        text=f"Veel Scenepacks · Search: {query}"
     )
 
     return embed
