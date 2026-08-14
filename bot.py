@@ -548,62 +548,63 @@ def page_packs(
     found = []
     seen = set()
 
-    for anchor in soup.select(
-        'a[href^="/i/"]'
-    ):
+    # EditPacks puts each scenepack behind an <a>
+    # whose text is something like:
+    # "Joe Goldberg Scenepack"
+    for anchor in soup.find_all("a", href=True):
 
-        href = anchor.get(
-            "href",
-            "",
-        )
+        href = anchor.get("href", "")
 
-        if not href:
+        if not href.startswith("/i/"):
             continue
 
         if href.startswith("/"):
-            href = (
-                f"https://{HOST}{href}"
-            )
+            href = f"https://{HOST}{href}"
 
-        href = href.split(
-            "#",
-            1,
-        )[0].rstrip("/")
+        href = href.split("#", 1)[0].rstrip("/")
 
         if href in seen:
             continue
 
-        # Find the containing pack card
-        card = None
-        current = anchor
+        pack_name = clean_text(
+            anchor.get_text(" ", strip=True)
+        )
 
-        for _ in range(10):
+        if not pack_name:
+            continue
 
-            if not current.parent:
+        # We only want actual scenepacks
+        if "scenepack" not in pack_name.lower():
+            continue
+
+        # ------------------------------------------------
+        # Find the container belonging to THIS pack
+        # ------------------------------------------------
+
+        card = anchor
+
+        for _ in range(8):
+
+            if not card.parent:
                 break
 
-            current = current.parent
+            card = card.parent
 
-            text = clean_text(
-                current.get_text(
+            card_text = clean_text(
+                card.get_text(
                     " ",
                     strip=True,
                 )
             )
 
-            item_links = current.select(
-                'a[href^="/i/"]'
-            )
-
+            # A pack card normally contains Preview
+            # and Download, so this helps us stop at
+            # the correct container.
             if (
-                "Scenepack" in text
-                and len(item_links) == 1
+                "Preview" in card_text
+                and "Download" in card_text
             ):
-                card = current
                 break
-
-        if card is None:
-            continue
 
         card_text = clean_text(
             card.get_text(
@@ -612,34 +613,102 @@ def page_packs(
             )
         )
 
-        if "Scenepack" not in card_text:
-            continue
+        # ------------------------------------------------
+        # Extract information from the card
+        # ------------------------------------------------
 
-        # Ignore voice lines
-        if "Voice Line" in card_text:
-            continue
+        details = []
 
-        pack_name = clean_text(
-            anchor.get_text(
-                " ",
-                strip=True,
+        # Resolution
+        resolution = re.search(
+            r"\b(4K|2K|1080p|720p|480p|360p)\b",
+            card_text,
+            flags=re.I,
+        )
+
+        if resolution:
+            details.append(
+                resolution.group(1)
             )
+
+        # Duration
+        duration = re.search(
+            r"\b\d{1,2}:\d{2}\b",
+            card_text,
         )
 
-        if not pack_name:
-            pack_name = "Scenepack"
+        if duration:
+            details.append(
+                duration.group(0)
+            )
 
-        info = extract_pack_info(
-            card_text
+        # File size
+        file_size = re.search(
+            r"\b\d+(?:\.\d+)?\s*(?:KB|MB|GB)\b",
+            card_text,
+            flags=re.I,
         )
+
+        if file_size:
+            details.append(
+                file_size.group(0)
+            )
+
+        # Downloads
+        downloads = re.search(
+            r"↓\s*([\d,.]+[KkMm]?)",
+            card_text,
+        )
+
+        if downloads:
+            details.append(
+                f"{downloads.group(1)} DL"
+            )
+
+        # ------------------------------------------------
+        # Extract uploader
+        #
+        # Examples:
+        # You by orbcrit
+        # You by Op
+        # You by tismpill
+        # ------------------------------------------------
+
+        uploader = None
+
+        uploader_match = re.search(
+            r"\bby\s+(.+?)(?=\s+\(|$)",
+            card_text,
+            flags=re.I,
+        )
+
+        if uploader_match:
+
+            uploader = clean_text(
+                uploader_match.group(1)
+            )
+
+            # Don't accidentally capture huge text
+            uploader = uploader[:40]
+
+        if uploader:
+            details.append(
+                uploader
+            )
+
+        # ------------------------------------------------
+        # Build unique display name
+        # ------------------------------------------------
 
         display_name = pack_name
 
-        if info:
+        if details:
             display_name += (
-                f" — {info}"
+                " — "
+                + " · ".join(details)
             )
 
+        # Prevent duplicate URLs
         seen.add(href)
 
         found.append(
@@ -650,7 +719,6 @@ def page_packs(
         )
 
     return found
-
 
 # ============================================================
 # UNIQUE
