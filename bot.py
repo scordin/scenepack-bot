@@ -1,12 +1,17 @@
 """
-EditPacks Discord scenepack search, powered by Serper.
+Edit Office Discord Bot
+-----------------------
+
+Commands:
+    /scenepack <title>
+    /resources
 
 Install:
-pip install discord.py requests python-dotenv beautifulsoup4
+    pip install discord.py requests python-dotenv beautifulsoup4
 
 .env:
-DISCORD_TOKEN=...
-SERPER_API_KEY=...
+    DISCORD_TOKEN=your_discord_bot_token
+    SERPER_API_KEY=your_serper_api_key
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ HOST = "editpacks.org"
 
 MAX_PACKS = 4
 
+# Your scenepack/resources channel
 ALLOWED_CHANNEL_ID = 1537846917130620939
 
 
@@ -53,21 +59,7 @@ class Result:
 
 
 # ============================================================
-# EDITPACKS URL CHECK
-# ============================================================
-
-def is_editpacks_url(url: str) -> bool:
-    parsed = urlparse(url)
-
-    return (
-        parsed.scheme in {"http", "https"}
-        and parsed.netloc.lower().removeprefix("www.") == HOST
-        and parsed.path.startswith("/source/")
-    )
-
-
-# ============================================================
-# TEXT CLEANING
+# GENERAL HELPERS
 # ============================================================
 
 def clean_text(value: str) -> str:
@@ -88,51 +80,41 @@ def clean_title(value: str) -> str:
         flags=re.I,
     )
 
-    value = re.sub(
-        r"\s*:\s*scenepacks?\s*&\s*audios?.*$",
-        "",
-        value,
-        flags=re.I,
-    )
+    return value.strip(
+        " -|–—"
+    ) or "Scenepack"
 
-    return value.strip(" -|–—") or "Scenepack"
+
+def is_editpacks_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+
+        return (
+            parsed.scheme in {
+                "http",
+                "https",
+            }
+            and parsed.netloc.lower().removeprefix("www.")
+            == HOST
+            and parsed.path.startswith("/source/")
+        )
+
+    except Exception:
+        return False
 
 
 # ============================================================
-# SEARCH
+# EDITPACKS PAGE REQUEST
 # ============================================================
 
-def direct_editpacks_page(query: str) -> list[Result]:
-    """
-    Try the obvious EditPacks /source/slug URL first.
-
-    This fixes searches like:
-        you
-        dexter
-        naruto
-        bleach
-        death note
-
-    where the EditPacks page exists but Serper doesn't
-    return it reliably.
-    """
-
-    # Turn the search into an EditPacks-style slug.
-    slug = re.sub(
-        r"[^a-z0-9]+",
-        "-",
-        query.lower(),
-    ).strip("-")
-
-    if not slug:
-        return []
-
-    url = f"https://{HOST}/source/{slug}"
+def fetch_page(
+    url: str,
+) -> tuple[BeautifulSoup, str] | None:
 
     try:
         response = requests.get(
             url,
-            timeout=12,
+            timeout=15,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 "
@@ -142,88 +124,135 @@ def direct_editpacks_page(query: str) -> list[Result]:
                     "Chrome/133.0 Safari/537.36"
                 )
             },
-            allow_redirects=True,
         )
 
-        if response.status_code != 200:
-            return []
-
-        # Make sure this is actually an EditPacks title page
-        # and not just some generic 200 response.
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser",
-        )
-
-        page_text = clean_text(
-            soup.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        # A real source page contains "items" and
-        # EditPacks title information.
-        if not re.search(
-            r"\b\d+\s+items?\b",
-            page_text,
-            flags=re.I,
-        ):
-            return []
-
-        h1 = soup.find("h1")
-
-        if not h1:
-            return []
-
-        title = clean_text(
-            h1.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        if not title:
-            return []
-
-        return [
-            Result(
-                title=title,
-                url=response.url,
-                snippet=page_text[:500],
-            )
-        ]
+        response.raise_for_status()
 
     except requests.RequestException:
+        return None
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser",
+    )
+
+    page_text = clean_text(
+        soup.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    return soup, page_text
+
+
+# ============================================================
+# DIRECT EDITPACKS SEARCH
+# ============================================================
+
+def direct_editpacks_page(
+    query: str,
+) -> list[Result]:
+
+    """
+    Try:
+
+        https://editpacks.org/source/<query>
+
+    before using Serper.
+
+    This is important for searches like:
+
+        you
+        dexter
+        naruto
+        bleach
+        breaking bad
+
+    where the page exists but Google/Serper might not
+    return it.
+    """
+
+    slug = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        query.lower(),
+    ).strip("-")
+
+    if not slug:
         return []
 
+    url = (
+        f"https://{HOST}/source/{slug}"
+    )
 
-def search_serper(query: str) -> list[Result]:
-    """
-    Search EditPacks.
+    page = fetch_page(url)
 
-    Order:
-        1. Direct /source/slug lookup
-        2. Serper fallback
-    """
+    if not page:
+        return []
+
+    soup, page_text = page
+
+    h1 = soup.find("h1")
+
+    if not h1:
+        return []
+
+    title = clean_text(
+        h1.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    if not title:
+        return []
+
+    # Make sure this is actually a source page.
+    # EditPacks source pages contain item counts.
+    if not re.search(
+        r"\b\d+\s+items?\b",
+        page_text,
+        flags=re.I,
+    ):
+        return []
+
+    return [
+        Result(
+            title=title,
+            url=url,
+            snippet=page_text[:500],
+        )
+    ]
+
+
+# ============================================================
+# SERPER SEARCH
+# ============================================================
+
+def search_serper(
+    query: str,
+) -> list[Result]:
 
     if not SERPER_API_KEY:
         raise RuntimeError(
             "SERPER_API_KEY is missing from .env"
         )
 
-    # ========================================================
-    # 1. DIRECT EDITPACKS LOOKUP
-    # ========================================================
+    # --------------------------------------------------------
+    # First try the obvious EditPacks URL.
+    # --------------------------------------------------------
 
-    direct = direct_editpacks_page(query)
+    direct = direct_editpacks_page(
+        query
+    )
 
     if direct:
         return direct
 
-    # ========================================================
-    # 2. SERPER FALLBACK
-    # ========================================================
+    # --------------------------------------------------------
+    # If direct lookup failed, use Serper.
+    # --------------------------------------------------------
 
     response = requests.post(
         SERPER_URL,
@@ -288,7 +317,7 @@ def search_serper(query: str) -> list[Result]:
 
 
 # ============================================================
-# SEARCH RESULT RANKING
+# SEARCH RESULT SCORE
 # ============================================================
 
 def score_result(
@@ -296,7 +325,7 @@ def score_result(
     query: str,
 ) -> int:
 
-    query_terms = [
+    terms = [
         x
         for x in re.findall(
             r"[a-z0-9]+",
@@ -310,65 +339,18 @@ def score_result(
 
     score = 0
 
-    for term in query_terms:
+    for term in terms:
 
-        # Exact title matches are useful for normal
-        # searches like "dexter".
         if term in title:
             score += 15
 
-        # Search snippets can contain character names.
         if term in snippet:
-            score += 10
+            score += 5
 
-    # Prefer EditPacks source/title pages.
     if "/source/" in result.url:
         score += 20
 
     return score
-
-
-# ============================================================
-# FETCH EDITPACKS PAGE
-# ============================================================
-
-def fetch_page(
-    url: str,
-) -> tuple[BeautifulSoup, str] | None:
-
-    try:
-        response = requests.get(
-            url,
-            timeout=15,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 "
-                    "(Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) "
-                    "Chrome/133.0 Safari/537.36"
-                )
-            },
-        )
-
-        response.raise_for_status()
-
-    except requests.RequestException:
-        return None
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser",
-    )
-
-    page_text = clean_text(
-        soup.get_text(
-            " ",
-            strip=True,
-        )
-    )
-
-    return soup, page_text
 
 
 # ============================================================
@@ -377,13 +359,20 @@ def fetch_page(
 
 def extract_title_info(
     soup: BeautifulSoup,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+]:
 
     title = None
     category = None
     year = None
 
-    # EditPacks has the actual page title as an H1.
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
     h1 = soup.find("h1")
 
     if h1:
@@ -394,66 +383,52 @@ def extract_title_info(
             )
         )
 
-    # The page has information like:
+    # --------------------------------------------------------
+    # CATEGORY + YEAR
     #
-    # Shows · 2006
-    # Anime · 2002
-    # Movies · 2018
-    #
-    # Find the text directly around the H1.
-    if h1:
-        previous_text = []
+    # We DON'T guess these anymore.
+    # We read them from EditPacks.
+    # --------------------------------------------------------
 
-        for element in h1.find_all_previous(
-            limit=8
-        ):
-            text = clean_text(
-                element.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
+    page_text = clean_text(
+        soup.get_text(
+            " ",
+            strip=True,
+        )
+    )
 
-            if text:
-                previous_text.append(text)
+    match = re.search(
+        r"\b("
+        r"Anime|"
+        r"Shows|"
+        r"Movies|"
+        r"Sports|"
+        r"Manga|"
+        r"Games|"
+        r"Streamers(?:\s*&\s*YouTubers)?|"
+        r"Music|"
+        r"Animations|"
+        r"K-Pop|"
+        r"Pictures"
+        r")"
+        r"\s*[·|]\s*"
+        r"((?:19|20)\d{2})\b",
+        page_text,
+        flags=re.I,
+    )
 
-        for text in previous_text:
-
-            match = re.search(
-                r"\b(Anime|Shows|Movies|Sports|Manga|Games|Streamers(?:\s*&\s*YouTubers)?|Music|Animations|K-Pop|Pictures)\s*[·|]\s*((?:19|20)\d{2})\b",
-                text,
-                flags=re.I,
-            )
-
-            if match:
-                category = match.group(1)
-                year = match.group(2)
-                break
-
-    # Fallback: search the entire page for the same pattern.
-    if not category or not year:
-
-        page_text = clean_text(
-            soup.get_text(
-                " ",
-                strip=True,
-            )
+    if match:
+        category = clean_text(
+            match.group(1)
         )
 
-        match = re.search(
-            r"\b(Anime|Shows|Movies|Sports|Manga|Games|Streamers(?:\s*&\s*YouTubers)?|Music|Animations|K-Pop|Pictures)\s*[·|]\s*((?:19|20)\d{2})\b",
-            page_text,
-            flags=re.I,
-        )
+        year = match.group(2)
 
-        if match:
-            category = match.group(1)
-            year = match.group(2)
-
-    if category:
-        category = clean_text(category)
-
-    return title, category, year
+    return (
+        title,
+        category,
+        year,
+    )
 
 
 # ============================================================
@@ -464,7 +439,10 @@ def extract_title_image(
     soup: BeautifulSoup,
 ) -> str | None:
 
-    # Best option: Open Graph image.
+    # --------------------------------------------------------
+    # OpenGraph image
+    # --------------------------------------------------------
+
     og_image = soup.find(
         "meta",
         attrs={
@@ -473,12 +451,17 @@ def extract_title_image(
     )
 
     if og_image:
-        image = og_image.get("content")
+        image = og_image.get(
+            "content"
+        )
 
         if image:
             return image
 
-    # Twitter image fallback.
+    # --------------------------------------------------------
+    # Twitter image
+    # --------------------------------------------------------
+
     twitter_image = soup.find(
         "meta",
         attrs={
@@ -487,13 +470,20 @@ def extract_title_image(
     )
 
     if twitter_image:
-        image = twitter_image.get("content")
+        image = twitter_image.get(
+            "content"
+        )
 
         if image:
             return image
 
-    # Final fallback: find the first sensible image.
-    for image_tag in soup.select("img"):
+    # --------------------------------------------------------
+    # Fallback to page images
+    # --------------------------------------------------------
+
+    for image_tag in soup.select(
+        "img"
+    ):
 
         src = (
             image_tag.get("src")
@@ -508,13 +498,15 @@ def extract_title_image(
             src = "https:" + src
 
         elif src.startswith("/"):
-            src = f"https://{HOST}{src}"
+            src = (
+                f"https://{HOST}{src}"
+            )
 
         lower = src.lower()
 
         if any(
-            x in lower
-            for x in (
+            word in lower
+            for word in (
                 "logo",
                 "favicon",
                 "avatar",
@@ -531,31 +523,29 @@ def extract_title_image(
 # PACK INFORMATION
 # ============================================================
 
-def extract_pack_info(card_text: str) -> str:
+def extract_pack_info(
+    card_text: str,
+) -> str:
+
     """
-    Extract a small amount of useful information from
-    one EditPacks pack card.
+    Extract useful information from a single
+    EditPacks pack.
 
     Example:
-    Scenepack 1080p 3:14↓ 139 Dexter by tismpill
 
-    -> 1080p · 3:14 · 139 DL · by tismpill
+        1080p · 3:14 · 139 DL · by tismpill
     """
 
-    text = clean_text(card_text)
-    parts = []
-
-    # Resolution
-    resolution = re.search(
-        r"\b(?:2160p|1440p|1080p|720p|480p|360p|4k|2k)\b",
-        text,
-        flags=re.I,
+    text = clean_text(
+        card_text
     )
 
-    if resolution:
-        parts.append(resolution.group(0))
+    parts = []
 
-    # Dub / Sub
+    # --------------------------------------------------------
+    # AUDIO
+    # --------------------------------------------------------
+
     audio = re.search(
         r"\b(?:New\s+Dub|Dub|Sub)\b",
         text,
@@ -563,18 +553,43 @@ def extract_pack_info(card_text: str) -> str:
     )
 
     if audio:
-        parts.insert(0, audio.group(0))
+        parts.append(
+            audio.group(0)
+        )
 
-    # Duration
+    # --------------------------------------------------------
+    # RESOLUTION
+    # --------------------------------------------------------
+
+    resolution = re.search(
+        r"\b(?:2160p|1440p|1080p|720p|480p|360p|4k|2k)\b",
+        text,
+        flags=re.I,
+    )
+
+    if resolution:
+        parts.append(
+            resolution.group(0)
+        )
+
+    # --------------------------------------------------------
+    # DURATION
+    # --------------------------------------------------------
+
     duration = re.search(
         r"\b\d{1,2}:\d{2}\b",
         text,
     )
 
     if duration:
-        parts.append(duration.group(0))
+        parts.append(
+            duration.group(0)
+        )
 
-    # File size
+    # --------------------------------------------------------
+    # FILE SIZE
+    # --------------------------------------------------------
+
     size = re.search(
         r"\b\d+(?:\.\d+)?\s*(?:KB|MB|GB)\b",
         text,
@@ -582,9 +597,14 @@ def extract_pack_info(card_text: str) -> str:
     )
 
     if size:
-        parts.append(size.group(0))
+        parts.append(
+            size.group(0)
+        )
 
-    # Downloads
+    # --------------------------------------------------------
+    # DOWNLOADS
+    # --------------------------------------------------------
+
     downloads = re.search(
         r"↓\s*([\d,.]+[kKmM]?)",
         text,
@@ -595,19 +615,22 @@ def extract_pack_info(card_text: str) -> str:
             f"{downloads.group(1)} DL"
         )
 
-    # Creator
+    # --------------------------------------------------------
+    # CREATOR
+    # --------------------------------------------------------
+
     creator = re.search(
-        r"\bby\s+(.+?)(?=$|\s+(?:S\d|Preview|Download))",
+        r"\bby\s+(.+?)(?=$|\s+(?:Preview|Download|S\d))",
         text,
         flags=re.I,
     )
 
     if creator:
+
         creator_name = clean_text(
             creator.group(1)
         )
 
-        # Remove trailing junk if present
         creator_name = re.sub(
             r"\s+(?:Preview|Download).*$",
             "",
@@ -617,58 +640,17 @@ def extract_pack_info(card_text: str) -> str:
 
         if len(creator_name) > 35:
             creator_name = (
-                creator_name[:32] + "..."
+                creator_name[:32]
+                + "..."
             )
 
         parts.append(
             f"by {creator_name}"
         )
 
-    return " · ".join(parts)
-
-
-# ============================================================
-# FIND CHARACTER / PACK NAME
-# ============================================================
-
-def find_nearest_heading(
-    anchor,
-) -> str | None:
-
-    # EditPacks organizes packs under H2 headings:
-    #
-    # Dexter Morgan
-    # 5
-    # Image
-    # Dexter Morgan Scenepack
-    #
-    # Find the closest heading above the card.
-    heading = anchor.find_previous(
-        ["h2", "h3", "h4"]
+    return " · ".join(
+        parts
     )
-
-    if not heading:
-        return None
-
-    value = clean_text(
-        heading.get_text(
-            " ",
-            strip=True,
-        )
-    )
-
-    if not value:
-        return None
-
-    # Ignore the main page title.
-    if value.lower() in {
-        "all characters",
-        "all titles",
-        "editpacks",
-    }:
-        return None
-
-    return value
 
 
 # ============================================================
@@ -678,28 +660,18 @@ def find_nearest_heading(
 def page_packs(
     soup: BeautifulSoup,
 ) -> list[Result]:
+
     """
-    Extract individual scenepacks from an EditPacks
-    source page.
+    Extract individual EditPacks /i/ packs.
 
-    Each pack gets:
-    - actual pack name
-    - character/section when available
-    - resolution
-    - duration
-    - file size
-    - downloads
-    - creator
-    - optional short note
-
-    This also prevents identical-looking pack names.
+    The parser deliberately searches for the smallest
+    card containing one /i/ link + Scenepack text.
+    This prevents duplicate pack names.
     """
 
     found = []
     seen = set()
 
-    # Every individual pack on EditPacks uses /i/
-    # links.
     for anchor in soup.select(
         'a[href^="/i/"]'
     ):
@@ -713,7 +685,9 @@ def page_packs(
             continue
 
         if href.startswith("/"):
-            href = f"https://{HOST}{href}"
+            href = (
+                f"https://{HOST}{href}"
+            )
 
         href = href.split(
             "#",
@@ -723,21 +697,13 @@ def page_packs(
         if href in seen:
             continue
 
-        # ====================================================
-        # FIND THE INDIVIDUAL CARD
-        # ====================================================
+        # ----------------------------------------------------
+        # Find the actual card.
+        # ----------------------------------------------------
 
         card = None
         current = anchor
 
-        # Walk upward until we find the smallest element
-        # containing:
-        #   - Scenepack
-        #   - Preview
-        #   - exactly one /i/ link
-        #
-        # This prevents us from accidentally grabbing the
-        # entire Dexter page.
         for _ in range(10):
 
             if not current.parent:
@@ -767,9 +733,9 @@ def page_packs(
         if card is None:
             continue
 
-        # ====================================================
-        # CARD TEXT
-        # ====================================================
+        # ----------------------------------------------------
+        # Card text
+        # ----------------------------------------------------
 
         card_text = clean_text(
             card.get_text(
@@ -778,7 +744,6 @@ def page_packs(
             )
         )
 
-        # Only actual scenepacks.
         if "Scenepack" not in card_text:
             continue
 
@@ -786,9 +751,9 @@ def page_packs(
         if "Voice Line" in card_text:
             continue
 
-        # ====================================================
-        # PACK NAME
-        # ====================================================
+        # ----------------------------------------------------
+        # Pack name
+        # ----------------------------------------------------
 
         pack_name = clean_text(
             anchor.get_text(
@@ -800,163 +765,42 @@ def page_packs(
         if not pack_name:
             pack_name = "Scenepack"
 
-        # ====================================================
-        # CHARACTER / SECTION
-        # ====================================================
-
-        character = None
-
-        # Find the nearest H2/H3 above this pack.
-        heading = anchor.find_previous(
-            ["h2", "h3", "h4"]
-        )
-
-        if heading:
-            heading_text = clean_text(
-                heading.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
-
-            # Don't use the main title as the character.
-            if (
-                heading_text
-                and heading_text.lower()
-                not in {
-                    "all characters",
-                    "all titles",
-                    "editpacks",
-                }
-            ):
-                character = heading_text
-
-        # ====================================================
-        # INFORMATION
-        # ====================================================
+        # ----------------------------------------------------
+        # Information
+        # ----------------------------------------------------
 
         info = extract_pack_info(
             card_text
         )
 
-        # ====================================================
-        # OPTIONAL NOTE
-        # ====================================================
+        # ----------------------------------------------------
+        # Optional season information
+        # ----------------------------------------------------
 
-        note = ""
-
-        # EditPacks sometimes has notes such as:
-        # "mix of seasons:"
-        # "S1 scp"
-        # "S1 ep1, intro pool death scene"
-        #
-        # Extract only short useful notes.
-        #
-        # We remove the normal metadata first.
-        note_text = re.sub(
-            r"Scenepack",
-            "",
+        season = re.search(
+            r"\bS\d+(?:\s*[-–]\s*S\d+)?\b",
             card_text,
             flags=re.I,
         )
 
-        note_text = re.sub(
-            r"\b(?:2160p|1440p|1080p|720p|480p|360p|4k|2k)\b",
-            "",
-            note_text,
-            flags=re.I,
-        )
-
-        note_text = re.sub(
-            r"\b(?:New\s+Dub|Dub|Sub)\b",
-            "",
-            note_text,
-            flags=re.I,
-        )
-
-        note_text = re.sub(
-            r"\b\d{1,2}:\d{2}\b",
-            "",
-            note_text,
-        )
-
-        note_text = re.sub(
-            r"\b\d+(?:\.\d+)?\s*(?:KB|MB|GB)\b",
-            "",
-            note_text,
-            flags=re.I,
-        )
-
-        note_text = re.sub(
-            r"↓\s*[\d,.]+[kKmM]?",
-            "",
-            note_text,
-        )
-
-        note_text = re.sub(
-            r"\bby\s+.+?(?=$|\s+(?:Preview|Download))",
-            "",
-            note_text,
-            flags=re.I,
-        )
-
-        note_text = clean_text(
-            note_text
-        )
-
-        # Remove common UI text.
-        note_text = re.sub(
-            r"\b(?:Preview|Download)\b",
-            "",
-            note_text,
-            flags=re.I,
-        )
-
-        note_text = clean_text(
-            note_text
-        )
-
-        # Only use notes that look meaningful.
-        if (
-            note_text
-            and len(note_text) <= 60
-            and note_text.lower()
-            not in {
-                pack_name.lower(),
-                character.lower()
-                if character
-                else "",
-            }
-        ):
-            # Don't accidentally use the title
-            # or character name as a note.
-            if (
-                "Scenepack"
-                not in note_text
-            ):
-                note = note_text
-
-        # ====================================================
-        # BUILD DISPLAY NAME
-        # ====================================================
+        # ----------------------------------------------------
+        # Build display
+        # ----------------------------------------------------
 
         display_name = pack_name
 
-        # If there is useful metadata, add it.
         if info:
             display_name += (
                 f" — {info}"
             )
 
-        # Add short note only when useful.
-        if note:
-            display_name += (
-                f" · {note}"
-            )
+        if season:
+            season_text = season.group(0)
 
-        # ====================================================
-        # SAVE
-        # ====================================================
+            if season_text.lower() not in display_name.lower():
+                display_name += (
+                    f" · {season_text}"
+                )
 
         seen.add(href)
 
@@ -971,7 +815,7 @@ def page_packs(
 
 
 # ============================================================
-# UNIQUE
+# UNIQUE RESULTS
 # ============================================================
 
 def unique(
@@ -986,20 +830,29 @@ def unique(
         if result.url in seen:
             continue
 
-        seen.add(result.url)
-        output.append(result)
+        seen.add(
+            result.url
+        )
+
+        output.append(
+            result
+        )
 
     return output
 
 
 # ============================================================
-# EMBED
+# SCENEPACK EMBED
 # ============================================================
 
 def make_embed(
     query: str,
     results: list[Result],
 ) -> discord.Embed:
+
+    # --------------------------------------------------------
+    # Pick best result
+    # --------------------------------------------------------
 
     ranked = sorted(
         results,
@@ -1013,7 +866,7 @@ def make_embed(
     main = ranked[0]
 
     # --------------------------------------------------------
-    # Load the ACTUAL EditPacks page.
+    # Read actual EditPacks page
     # --------------------------------------------------------
 
     page = fetch_page(
@@ -1021,10 +874,15 @@ def make_embed(
     )
 
     if page:
+
         soup, page_text = page
 
-        real_title, category, year = (
-            extract_title_info(soup)
+        (
+            real_title,
+            category,
+            year,
+        ) = extract_title_info(
+            soup
         )
 
         packs = page_packs(
@@ -1036,6 +894,7 @@ def make_embed(
         )
 
     else:
+
         soup = None
         page_text = ""
 
@@ -1047,7 +906,7 @@ def make_embed(
         image = None
 
     # --------------------------------------------------------
-    # Use EditPacks' own title.
+    # Title
     # --------------------------------------------------------
 
     title = (
@@ -1057,75 +916,35 @@ def make_embed(
     )
 
     # --------------------------------------------------------
-    # If the search was for a character, the search
-    # result may point to a title page. That's okay,
-    # but make sure we actually found matching packs.
+    # Pack count
     # --------------------------------------------------------
 
-    if packs:
+    total_packs = None
 
-        query_terms = [
-            x
-            for x in re.findall(
-                r"[a-z0-9]+",
-                query.lower(),
-            )
-            if len(x) > 1
-        ]
+    count_match = re.search(
+        r"\b(\d+)\s+items?\b",
+        page_text,
+        flags=re.I,
+    )
 
-        matching_packs = []
+    if count_match:
+        total_packs = int(
+            count_match.group(1)
+        )
 
-        for pack in packs:
+    if total_packs is None:
+        total_packs = len(packs)
 
-            pack_text = (
-                f"{pack.title}"
-            ).lower()
-
-            if any(
-                term in pack_text
-                for term in query_terms
-            ):
-                matching_packs.append(
-                    pack
-                )
-
-        # If we have matching character packs,
-        # prefer those.
-        if matching_packs:
-            packs = matching_packs
+    # --------------------------------------------------------
+    # Limit displayed packs
+    # --------------------------------------------------------
 
     packs = unique(
         packs
     )[:MAX_PACKS]
 
     # --------------------------------------------------------
-    # Count actual EditPacks items.
-    # --------------------------------------------------------
-
-    total_packs = None
-
-    if page_text:
-
-        count_match = re.search(
-            r"\b(\d+)\s+items?\b",
-            page_text,
-            flags=re.I,
-        )
-
-        if count_match:
-            total_packs = int(
-                count_match.group(1)
-            )
-
-    if total_packs is None:
-        total_packs = len(packs)
-
-    # --------------------------------------------------------
-    # Information line.
-    #
-    # IMPORTANT:
-    # category/year comes ONLY from EditPacks.
-    # No guessing.
+    # Info
     # --------------------------------------------------------
 
     info_parts = []
@@ -1141,13 +960,15 @@ def make_embed(
         )
 
     info = (
-        " · ".join(info_parts)
+        " · ".join(
+            info_parts
+        )
         if info_parts
         else None
     )
 
     # --------------------------------------------------------
-    # Pack bullets.
+    # Pack bullets
     # --------------------------------------------------------
 
     bullets = [
@@ -1211,24 +1032,404 @@ def make_embed(
     # --------------------------------------------------------
 
     if image:
+
         embed.set_thumbnail(
             url=image
         )
 
     embed.set_footer(
-        text=f"Results for {query} · 1 title"
+        text=(
+            f"Results for {query} · 1 title"
+        )
     )
 
     return embed
 
 
 # ============================================================
+# RESOURCES
+# ============================================================
+
+RESOURCE_CATEGORIES = {
+
+    "vfx": {
+        "name": "🎨 VFX",
+        "description": (
+            "Visual effects, particles, "
+            "smoke, energy, explosions and more."
+        ),
+        "resources": [
+            (
+                "ProductionCrate",
+                "Free VFX, textures, overlays and visual effects.",
+                "https://productioncrate.com/",
+            ),
+            (
+                "FootageCrate",
+                "Free VFX and pre-keyed video effects.",
+                "https://footagecrate.com/",
+            ),
+            (
+                "FreeVisuals",
+                "Free editing assets including VFX and motion graphics.",
+                "https://www.freevisuals.net/",
+            ),
+        ],
+    },
+
+    "sfx": {
+        "name": "🔊 SFX",
+        "description": (
+            "Sound effects for edits, anime clips, "
+            "movies, gaming and more."
+        ),
+        "resources": [
+            (
+                "Pixabay Sound Effects",
+                "Large library of free sound effects.",
+                "https://pixabay.com/sound-effects/",
+            ),
+            (
+                "Mixkit SFX",
+                "Free impacts, whooshes, risers, glitches and more.",
+                "https://mixkit.co/free-sound-effects/",
+            ),
+            (
+                "Freesound",
+                "Huge community library of sound effects.",
+                "https://freesound.org/",
+            ),
+        ],
+    },
+
+    "transitions": {
+        "name": "🔄 Transitions",
+        "description": (
+            "Zooms, glitches, slides, spins, "
+            "wipes and other transitions."
+        ),
+        "resources": [
+            (
+                "Mixkit — After Effects",
+                "Free After Effects transitions and templates.",
+                "https://mixkit.co/free-after-effects-templates/transitions/",
+            ),
+            (
+                "Mixkit — Premiere Pro",
+                "Free Premiere Pro transition templates.",
+                "https://mixkit.co/free-premiere-pro-templates/transitions/",
+            ),
+            (
+                "Mixkit — DaVinci Resolve",
+                "Free DaVinci Resolve transition templates.",
+                "https://mixkit.co/free-davinci-resolve-templates/transitions/",
+            ),
+        ],
+    },
+
+    "overlays": {
+        "name": "🖼️ Overlays",
+        "description": (
+            "Film burns, VHS, glitches, "
+            "particles, light leaks and textures."
+        ),
+        "resources": [
+            (
+                "ProductionCrate",
+                "VFX, film burns, VHS, textures and overlay effects.",
+                "https://footagecrate.productioncrate.com/textures-and-overlay-filters-categories.html",
+            ),
+            (
+                "Mixkit Overlays",
+                "Free overlay templates and motion graphics.",
+                "https://mixkit.co/free-after-effects-templates/overlay/",
+            ),
+            (
+                "FreeVisuals",
+                "Free overlays, motion graphics and editing assets.",
+                "https://www.freevisuals.net/",
+            ),
+        ],
+    },
+
+    "music": {
+        "name": "🎵 Music",
+        "description": (
+            "Music and audio resources "
+            "for your edits."
+        ),
+        "resources": [
+            (
+                "Pixabay Music",
+                "Free music and audio for creative projects.",
+                "https://pixabay.com/music/",
+            ),
+            (
+                "Mixkit Music",
+                "Free music tracks for videos and projects.",
+                "https://mixkit.co/free-stock-music/",
+            ),
+        ],
+    },
+
+    "fonts": {
+        "name": "🔤 Fonts",
+        "description": (
+            "Fonts for subtitles, typography, "
+            "posters and motion graphics."
+        ),
+        "resources": [
+            (
+                "Google Fonts",
+                "Large collection of open-source fonts.",
+                "https://fonts.google.com/",
+            ),
+            (
+                "DaFont",
+                "Huge collection of display and creative fonts.",
+                "https://www.dafont.com/",
+            ),
+            (
+                "Font Squirrel",
+                "Free fonts with licensing information.",
+                "https://www.fontsquirrel.com/",
+            ),
+        ],
+    },
+
+    "presets": {
+        "name": "🎛️ Presets & Templates",
+        "description": (
+            "Editing presets, templates "
+            "and ready-made project assets."
+        ),
+        "resources": [
+            (
+                "Mixkit",
+                "Free templates for After Effects, Premiere Pro and more.",
+                "https://mixkit.co/",
+            ),
+            (
+                "FreeVisuals",
+                "Free templates, presets, LUTs and editing resources.",
+                "https://www.freevisuals.net/",
+            ),
+            (
+                "Motion Array — Free",
+                "Free editing templates, presets and assets.",
+                "https://motionarray.com/browse/free/",
+            ),
+        ],
+    },
+
+    "luts": {
+        "name": "🎨 LUTs / Coloring",
+        "description": (
+            "LUTs, color grades and resources "
+            "for cinematic coloring."
+        ),
+        "resources": [
+            (
+                "FreeVisuals",
+                "Free LUTs and color grading resources.",
+                "https://www.freevisuals.net/",
+            ),
+            (
+                "IWLTBAP",
+                "Color grading tools, LUTs and editing resources.",
+                "https://luts.iwltbap.com/",
+            ),
+        ],
+    },
+
+    "footage": {
+        "name": "🎥 Stock Footage",
+        "description": (
+            "Background footage, textures, "
+            "B-roll and visual assets."
+        ),
+        "resources": [
+            (
+                "Pexels",
+                "Free stock videos and footage.",
+                "https://www.pexels.com/videos/",
+            ),
+            (
+                "Pixabay",
+                "Free videos, images and creative assets.",
+                "https://pixabay.com/videos/",
+            ),
+            (
+                "Mixkit",
+                "Free stock video and creative assets.",
+                "https://mixkit.co/free-stock-video/",
+            ),
+        ],
+    },
+}
+
+
+# ============================================================
+# RESOURCE DROPDOWN
+# ============================================================
+
+class ResourceSelect(
+    discord.ui.Select
+):
+
+    def __init__(self):
+
+        options = [
+
+            discord.SelectOption(
+                label="VFX",
+                value="vfx",
+                emoji="🎨",
+                description="Visual effects and particles",
+            ),
+
+            discord.SelectOption(
+                label="SFX",
+                value="sfx",
+                emoji="🔊",
+                description="Sound effects",
+            ),
+
+            discord.SelectOption(
+                label="Transitions",
+                value="transitions",
+                emoji="🔄",
+                description="Transitions and motion effects",
+            ),
+
+            discord.SelectOption(
+                label="Overlays",
+                value="overlays",
+                emoji="🖼️",
+                description="Overlays, VHS, film burns and textures",
+            ),
+
+            discord.SelectOption(
+                label="Music",
+                value="music",
+                emoji="🎵",
+                description="Music and audio",
+            ),
+
+            discord.SelectOption(
+                label="Fonts",
+                value="fonts",
+                emoji="🔤",
+                description="Fonts for editing",
+            ),
+
+            discord.SelectOption(
+                label="Presets & Templates",
+                value="presets",
+                emoji="🎛️",
+                description="Presets and templates",
+            ),
+
+            discord.SelectOption(
+                label="LUTs / Coloring",
+                value="luts",
+                emoji="🎨",
+                description="LUTs and color grading",
+            ),
+
+            discord.SelectOption(
+                label="Stock Footage",
+                value="footage",
+                emoji="🎥",
+                description="Stock footage and B-roll",
+            ),
+        ]
+
+        super().__init__(
+            placeholder=(
+                "Choose a resource category..."
+            ),
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        category = RESOURCE_CATEGORIES[
+            self.values[0]
+        ]
+
+        embed = discord.Embed(
+            title=category["name"],
+            description=category["description"],
+            colour=discord.Colour.from_rgb(
+                114,
+                137,
+                218,
+            ),
+        )
+
+        embed.set_author(
+            name="Edit Office • Resources"
+        )
+
+        for (
+            name,
+            description,
+            url,
+        ) in category["resources"]:
+
+            embed.add_field(
+                name=f"🔗 [{name}]({url})",
+                value=description,
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=(
+                "Always check the license before "
+                "using an asset commercially."
+            )
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self.view,
+        )
+
+
+# ============================================================
+# RESOURCE VIEW
+# ============================================================
+
+class ResourceView(
+    discord.ui.View
+):
+
+    def __init__(self):
+
+        super().__init__(
+            timeout=300
+        )
+
+        self.add_item(
+            ResourceSelect()
+        )
+
+
+# ============================================================
 # BOT
 # ============================================================
 
-class Bot(discord.Client):
+class Bot(
+    discord.Client
+):
 
-    def __init__(self) -> None:
+    def __init__(self):
 
         super().__init__(
             intents=discord.Intents.none()
@@ -1242,7 +1443,7 @@ class Bot(discord.Client):
 
     async def setup_hook(
         self,
-    ) -> None:
+    ):
 
         await self.tree.sync()
 
@@ -1255,7 +1456,7 @@ bot = Bot()
 # ============================================================
 
 @bot.event
-async def on_ready() -> None:
+async def on_ready():
 
     print(
         f"✓ Bot is ready: "
@@ -1264,31 +1465,35 @@ async def on_ready() -> None:
     )
 
     print(
-        "✓ /scenepack is synced and ready to use."
+        "✓ /scenepack is synced."
+    )
+
+    print(
+        "✓ /resources is synced."
     )
 
 
 # ============================================================
-# COMMAND
+# /SCENEPACK
 # ============================================================
 
 @bot.tree.command(
     name="scenepack",
     description=(
         "Find EditPacks for a movie, show, anime, "
-        "sport, streamer, game, or music"
+        "sport, streamer, game or character"
     ),
 )
 @discord.app_commands.describe(
     title=(
         "Movie, show, anime, sport, streamer, "
-        "game, music, or character"
+        "game or character"
     ),
 )
 async def scenepack(
     interaction: discord.Interaction,
     title: str,
-) -> None:
+):
 
     title = title.strip()
 
@@ -1321,7 +1526,7 @@ async def scenepack(
         return
 
     # --------------------------------------------------------
-    # Searching
+    # Search
     # --------------------------------------------------------
 
     await interaction.response.defer(
@@ -1345,7 +1550,7 @@ async def scenepack(
         return
 
     # --------------------------------------------------------
-    # No result
+    # No results
     # --------------------------------------------------------
 
     if not results:
@@ -1376,14 +1581,168 @@ async def scenepack(
 
 
 # ============================================================
-# START
+# /RESOURCES
+# ============================================================
+
+@bot.tree.command(
+    name="resources",
+    description=(
+        "Find VFX, SFX, transitions, overlays, "
+        "fonts, presets and other editing resources"
+    ),
+)
+async def resources(
+    interaction: discord.Interaction,
+):
+
+    # --------------------------------------------------------
+    # Channel restriction
+    # --------------------------------------------------------
+
+    if (
+        interaction.channel_id
+        != ALLOWED_CHANNEL_ID
+    ):
+
+        return await interaction.response.send_message(
+            f"Use this command in "
+            f"<#{ALLOWED_CHANNEL_ID}>.",
+            ephemeral=True,
+        )
+
+    # --------------------------------------------------------
+    # Main resources embed
+    # --------------------------------------------------------
+
+    embed = discord.Embed(
+        title="🎬 Editing Resources",
+        description=(
+            "A collection of useful resources "
+            "for video editors.\n\n"
+            "Choose a category below to browse "
+            "VFX, SFX, transitions, overlays, "
+            "fonts, presets and more."
+        ),
+        colour=discord.Colour.from_rgb(
+            114,
+            137,
+            218,
+        ),
+    )
+
+    embed.set_author(
+        name="Edit Office • Resources"
+    )
+
+    embed.add_field(
+        name="🎨 VFX",
+        value=(
+            "Effects, particles, smoke, "
+            "energy & more"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🔊 SFX",
+        value=(
+            "Impacts, whooshes, "
+            "risers & sounds"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🔄 Transitions",
+        value=(
+            "Zooms, glitches, "
+            "slides & spins"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🖼️ Overlays",
+        value=(
+            "VHS, film burns, "
+            "light leaks & textures"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🎛️ Presets",
+        value=(
+            "Presets, templates "
+            "& project files"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🎨 Coloring",
+        value=(
+            "LUTs & color grading "
+            "resources"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🔤 Fonts",
+        value=(
+            "Fonts for subtitles "
+            "& typography"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🎵 Music",
+        value=(
+            "Music and audio "
+            "for edits"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🎥 Footage",
+        value=(
+            "Stock footage "
+            "& B-roll"
+        ),
+        inline=True,
+    )
+
+    embed.set_footer(
+        text="Select a category below"
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=ResourceView(),
+    )
+
+
+# ============================================================
+# START BOT
 # ============================================================
 
 if __name__ == "__main__":
 
     if not TOKEN:
+
         raise RuntimeError(
             "DISCORD_TOKEN is missing from .env"
         )
 
-    bot.run(TOKEN)
+    if not SERPER_API_KEY:
+
+        raise RuntimeError(
+            "SERPER_API_KEY is missing from .env"
+        )
+
+    bot.run(
+        TOKEN
+    )
