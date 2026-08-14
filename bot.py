@@ -44,15 +44,6 @@ def label(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip(" -|–—") or "Scenepack"
 
 
-def is_format_label(value: str) -> bool:
-    return bool(re.fullmatch(r"(?:h\.?26[45]|\d{3,4}p|\d+)", value.strip(), re.I))
-
-
-def display_title(query: str) -> str:
-    """The user's search is usually cleaner than a search-engine page title."""
-    return " ".join(word.capitalize() if word.islower() else word for word in query.split())
-
-
 def metadata(*values: str) -> str | None:
     text = " ".join(values)
     year = re.search(r"\b((?:19|20)\d{2})\b", text)
@@ -97,25 +88,15 @@ def page_packs(url: str) -> list[Result]:
         response.raise_for_status()
     except requests.RequestException:
         return []
-    found, seen, labels_seen = [], {url.rstrip("/")}, set()
+    found, seen = [], {url.rstrip("/")}
     for anchor in BeautifulSoup(response.text, "html.parser").select("a[href]"):
         href = anchor["href"]
         if href.startswith("/"):
             href = f"https://{HOST}{href}"
         href = href.split("#", 1)[0].rstrip("/")
         text = label(anchor.get_text(" ", strip=True))
-        # Download links are often labelled only "1080p" or "H.264". The nearest
-        # preceding heading on the title page normally carries the character/season.
-        if is_format_label(text):
-            heading = anchor.find_previous(["h6", "h5", "h4", "h3", "h2"])
-            if heading:
-                candidate = label(heading.get_text(" ", strip=True))
-                if not is_format_label(candidate):
-                    text = candidate
-        label_key = text.casefold()
-        if is_pack_url(href) and href not in seen and text != "Scenepack" and label_key not in labels_seen:
+        if is_pack_url(href) and href not in seen and text != "Scenepack":
             seen.add(href)
-            labels_seen.add(label_key)
             found.append(Result(text[:120], href))
     return found
 
@@ -153,9 +134,8 @@ def make_embed(query: str, results: list[Result]) -> discord.Embed:
     if not bullets:
         bullets = ["• No individual links were indexed yet — open the title to browse it."]
     info = metadata(main.title, main.snippet)
-    embed = discord.Embed(title=display_title(query), url=main.url,
-                          description=f"## Results for `{query}` · {len(packs)} packs across 1 title"
-                                      + (f"\n\n*{info}*" if info else ""),
+    embed = discord.Embed(title=label(main.title), url=main.url,
+                          description=f"**{len(packs)} packs found**" + (f"  •  {info}" if info else ""),
                           colour=discord.Colour.from_rgb(114, 137, 218))
     embed.set_author(name="411 Scenepacks")
     embed.add_field(name="Available packs", value="\n".join(bullets), inline=False)
@@ -163,7 +143,7 @@ def make_embed(query: str, results: list[Result]) -> discord.Embed:
     image = poster_url(query)
     if image:
         embed.set_thumbnail(url=image)
-    embed.set_footer(text="Page 1 of 1 · Titles 1–1 of 1")
+    embed.set_footer(text=f"Results for {query} · 1 title")
     return embed
 
 
