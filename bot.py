@@ -880,23 +880,14 @@ class Bot(discord.Client):
             id=int(guild_id)
         )
 
-        # Register the current /scenepack command
-        # directly to your server.
-        await self.tree.sync(
-            guild=guild
-        )
+        # Copy the commands defined in this file
+        # to this specific server.
+        self.tree.copy_global_to(guild=guild)
 
-        # Remove ALL old global commands.
-        # This gets rid of old /resources and
-        # duplicate global /scenepack commands.
-        self.tree.clear_commands(
-            guild=None
-        )
+        # Sync them to the server.
+        await self.tree.sync(guild=guild)
 
-        await self.tree.sync()
-
-        print("✓ Server commands synced.")
-        print("✓ Old global commands cleared.")
+        print("✓ Server slash commands synced.")
 
 
 bot = Bot()
