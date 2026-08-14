@@ -23,6 +23,9 @@ SERPER_URL = "https://google.serper.dev/search"
 SERPER_IMAGES_URL = "https://google.serper.dev/images"
 HOST = "scenepacks.com"
 MAX_PACKS = 4
+# Comma-separated Railway variable. The default keeps the bot locked to the
+# channel you supplied even before the variable is added in Railway.
+DEFAULT_ALLOWED_CHANNEL_IDS = "1537846917130620939"
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,21 @@ class Result:
     title: str
     url: str
     snippet: str = ""
+
+
+def allowed_channel_ids() -> set[int]:
+    raw = os.getenv("ALLOWED_CHANNEL_IDS", DEFAULT_ALLOWED_CHANNEL_IDS)
+    return {int(value.strip()) for value in raw.split(",") if value.strip().isdigit()}
+
+
+async def require_allowed_channel(interaction: discord.Interaction) -> bool:
+    if interaction.channel_id in allowed_channel_ids():
+        return True
+    channel_list = ", ".join(f"<#{channel_id}>" for channel_id in allowed_channel_ids())
+    await interaction.response.send_message(
+        f"This bot only works in {channel_list}.", ephemeral=True
+    )
+    return False
 
 
 def is_pack_url(url: str) -> bool:
@@ -42,6 +60,15 @@ def is_pack_url(url: str) -> bool:
 def label(value: str) -> str:
     value = re.sub(r"\s*[|–—-]\s*(?:411|Scenepacks?|Editing Clips.*)$", "", value, flags=re.I)
     return re.sub(r"\s+", " ", value).strip(" -|–—") or "Scenepack"
+
+
+def is_format_label(value: str) -> bool:
+    return bool(re.fullmatch(r"(?:h\.?26[45]|\d{3,4}p|\d+)", value.strip(), re.I))
+
+
+def display_title(query: str) -> str:
+    """The user's search is usually cleaner than a search-engine page title."""
+    return " ".join(word.capitalize() if word.islower() else word for word in query.split())
 
 
 def metadata(*values: str) -> str | None:
@@ -88,15 +115,25 @@ def page_packs(url: str) -> list[Result]:
         response.raise_for_status()
     except requests.RequestException:
         return []
-    found, seen = [], {url.rstrip("/")}
+    found, seen, labels_seen = [], {url.rstrip("/")}, set()
     for anchor in BeautifulSoup(response.text, "html.parser").select("a[href]"):
         href = anchor["href"]
         if href.startswith("/"):
             href = f"https://{HOST}{href}"
         href = href.split("#", 1)[0].rstrip("/")
         text = label(anchor.get_text(" ", strip=True))
-        if is_pack_url(href) and href not in seen and text != "Scenepack":
+        # Download links are often labelled only "1080p" or "H.264". The nearest
+        # preceding heading on the title page normally carries the character/season.
+        if is_format_label(text):
+            heading = anchor.find_previous(["h6", "h5", "h4", "h3", "h2"])
+            if heading:
+                candidate = label(heading.get_text(" ", strip=True))
+                if not is_format_label(candidate):
+                    text = candidate
+        label_key = text.casefold()
+        if is_pack_url(href) and href not in seen and text != "Scenepack" and label_key not in labels_seen:
             seen.add(href)
+            labels_seen.add(label_key)
             found.append(Result(text[:120], href))
     return found
 
@@ -134,8 +171,9 @@ def make_embed(query: str, results: list[Result]) -> discord.Embed:
     if not bullets:
         bullets = ["• No individual links were indexed yet — open the title to browse it."]
     info = metadata(main.title, main.snippet)
-    embed = discord.Embed(title=label(main.title), url=main.url,
-                          description=f"**{len(packs)} packs found**" + (f"  •  {info}" if info else ""),
+    embed = discord.Embed(title=display_title(query), url=main.url,
+                          description=f"## Results for `{query}` · {len(packs)} packs across 1 title"
+                                      + (f"\n\n*{info}*" if info else ""),
                           colour=discord.Colour.from_rgb(114, 137, 218))
     embed.set_author(name="411 Scenepacks")
     embed.add_field(name="Available packs", value="\n".join(bullets), inline=False)
@@ -143,7 +181,7 @@ def make_embed(query: str, results: list[Result]) -> discord.Embed:
     image = poster_url(query)
     if image:
         embed.set_thumbnail(url=image)
-    embed.set_footer(text=f"Results for {query} · 1 title")
+    embed.set_footer(text="Page 1 of 1 · Titles 1–1 of 1")
     return embed
 
 
@@ -168,6 +206,8 @@ async def on_ready() -> None:
 @bot.tree.command(name="scenepack", description="Find 411 Scenepacks for a movie or show")
 @discord.app_commands.describe(title="Movie, show, or character to search for")
 async def scenepack(interaction: discord.Interaction, title: str) -> None:
+    if not await require_allowed_channel(interaction):
+        return
     title = title.strip()
     if not title:
         await interaction.response.send_message("Please enter a title to search for.", ephemeral=True)
