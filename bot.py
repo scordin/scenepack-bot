@@ -858,34 +858,45 @@ def make_embed(
 # BOT
 # ============================================================
 
-class Bot(
-    discord.Client
-):
+class Bot(discord.Client):
 
     def __init__(self):
-
         super().__init__(
             intents=discord.Intents.none()
         )
 
-        self.tree = (
-            discord.app_commands.CommandTree(
-                self
+        self.tree = discord.app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+
+        guild_id = os.getenv("GUILD_ID")
+
+        if not guild_id:
+            raise RuntimeError(
+                "GUILD_ID is missing from Railway Variables"
             )
+
+        guild = discord.Object(
+            id=int(guild_id)
         )
 
-async def setup_hook(self):
-    # Remove old globally registered commands
-    self.tree.clear_commands(guild=None)
+        # Register the current /scenepack command
+        # directly to your server.
+        await self.tree.sync(
+            guild=guild
+        )
 
-    # Re-add ONLY the current /scenepack command
-    self.tree.add_command(scenepack)
+        # Remove ALL old global commands.
+        # This gets rid of old /resources and
+        # duplicate global /scenepack commands.
+        self.tree.clear_commands(
+            guild=None
+        )
 
-    # Sync the cleaned command list with Discord
-    await self.tree.sync()
+        await self.tree.sync()
 
-    print("✓ Old commands cleared.")
-    print("✓ Only /scenepack has been synced.")
+        print("✓ Server commands synced.")
+        print("✓ Old global commands cleared.")
 
 
 bot = Bot()
